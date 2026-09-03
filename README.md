@@ -12,11 +12,12 @@ erweitert von Martin Oswald ([@mad](https://1MHz.de)).
 |---|---|
 | Reset, Reboot, PowerOff, Ultimate-Menü | über Menü, Tasten oder NFC-Karte |
 | CPU-Geschwindigkeit umschalten | Liste kommt vom c64u |
+| **Joystickports tauschen** | Config *Joystick Swapper* im c64u, Normal / Swapped / WASD |
 | Verbindungstest und Statusanzeige | WLAN, Erreichbarkeit, Passwort |
 | **WLAN per NFC-Karte einrichten** | eine am M5Dial oder Core beschriebene Karte auflegen – kein Neuflashen |
 | **Bis zu vier WLAN-Zugänge** | im internen Speicher (NVS), beim Start wird das Netz mit dem besten Empfang genommen |
 | **Setup-Portal** | eigener Accesspoint mit Weboberfläche, falls keine Karte zur Hand ist |
-| **Befehlskarten lesen** | `CMD:RESET`, `CMD:REBOOT`, `CMD:MENU`, `CMD:POWEROFF`, `CMD:CPU=…` |
+| **Befehlskarten lesen** | `CMD:RESET`, `CMD:REBOOT`, `CMD:MENU`, `CMD:POWEROFF`, `CMD:CPU=…`, `CMD:JOY` |
 | **Karten beschreiben** | Befehlskarten und WLAN-Karten |
 | MiniJoyC (HAT-Port) | wie bisher, optional |
 
@@ -50,8 +51,14 @@ Stick drücken = Ultimate-Menü. Auf dem Startbild: hoch = Reset, runter = Power
 ### Menü
 
 ```
-PowerOff · CPU Speed · NFC / RFID · WLAN · Connection Test · Status · Settings
+PowerOff · CPU Speed · NFC / RFID · WLAN · Joystick Swap · Status · Settings
 ```
+
+`Joystick Swap` tauscht die Joystickports **im c64u** (nicht den MiniJoyC):
+jeder Druck schaltet zwischen *Normal* und *Swapped* um. Alle vom Gerät
+gemeldeten Werte – je nach Firmware auch *WASD Port 1/2* – erreichst du über
+*Settings → c64u Joystick*. Der frühere Punkt `Connection Test` ist entfallen;
+dieselbe Prüfung löst ein Druck auf der `Status`-Seite aus.
 
 **NFC / RFID**
 

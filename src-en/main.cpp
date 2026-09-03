@@ -82,6 +82,7 @@ constexpr uint32_t kHomeEffectMs = 5000;
 constexpr uint32_t kHomeLongEffectMs = 7000;
 constexpr uint32_t kHomeStaticMs = 1000;
 constexpr size_t kMaxCpuChoices = 16;
+constexpr size_t kMaxJoyChoices = 6;
 
 // MiniJoyC: treat as offline only after several read errors
 constexpr uint8_t kJoyOfflineThreshold = 6;
@@ -151,7 +152,7 @@ enum MenuId : uint8_t {
   kMenuCpuSpeed,
   kMenuNfc,
   kMenuWifi,
-  kMenuConnTest,
+  kMenuJoySwap,
   kMenuStatus,
   kMenuSettings,
   kMenuIdCount
@@ -162,7 +163,7 @@ constexpr const char* kMenuItems[] = {
     "CPU Speed",
     "NFC / RFID",
     "WiFi",
-    "Connection Test",
+    "Joystick Swap",
     "Status",
     "Settings",
 };
@@ -181,6 +182,7 @@ enum SettingsId : uint8_t {
   kSetEffectTime,
   kSetStaticTime,
   kSetBrightness,
+  kSetJoystick,        // port mapping in the c64u (config "Joystick Swapper")
   kSetFactoryReset,
   kSetItemCount
 };
@@ -198,6 +200,7 @@ constexpr const char* kDisplayMenuItems[] = {
     "Effect Time",
     "Static Time",
     "Brightness",
+    "c64u Joystick",
     "Factory Reset",
 };
 constexpr size_t kDisplayMenuCount = sizeof(kDisplayMenuItems) / sizeof(kDisplayMenuItems[0]);
@@ -266,11 +269,12 @@ enum class CardCmd : uint8_t {
   UltiMenu,
   PowerOff,        // Argument = confirmation time in seconds, 0 = immediately
   CpuSpeed,        // Argument = desired value, e.g. "10"
+  JoySwap,         // Argument = target value; without one it toggles
 };
 
 struct CardCommand {
   CardCmd cmd = CardCmd::None;
-  String  arg;                 // PowerOff: seconds, CpuSpeed: MHz
+  String  arg;                 // PowerOff: seconds, CpuSpeed: MHz, JoySwap: target
   bool    hasArg = false;
 };
 
@@ -417,6 +421,13 @@ struct AppState {
   String cpuWireOptions[kMaxCpuChoices];
   String cpuDisplayOptions[kMaxCpuChoices];
   size_t cpuChoiceCount = 0;
+
+  String joyCategory;
+  String joyItem;
+  String joyValue;
+  bool joyPathKnown = false;
+  String joyOptions[kMaxJoyChoices];
+  size_t joyChoiceCount = 0;
 
   bool configReady = false;
   ConnectionState connection = {};
@@ -667,6 +678,7 @@ void goBack(uint32_t now);
 void activateCurrent(uint32_t now);
 void openNfcMenu(uint32_t now);
 void openWifiMenu(uint32_t now);
+void cycleJoystickValue(uint32_t now);
 
 const char* displayEffectModeLabel(DisplayEffectMode mode) {
   switch (mode) {
@@ -1037,6 +1049,10 @@ void activateDisplaySetting(uint32_t now) {
       applyDisplaySettingChange(now, String("BRIGHT ") + brightnessLabel(app.settings.brightness));
       break;
 
+    case kSetJoystick:
+      cycleJoystickValue(now);
+      break;
+
     case kSetFactoryReset:
       loadDefaultDisplaySettings();
       applyBrightness();
@@ -1156,6 +1172,51 @@ void setFallbackCpuChoices() {
 // ------------------------------------------------------------
 // REST request
 // ------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Joystick ports of the c64u
+//
+// This is not about the MiniJoyC on the HAT port but about the port mapping
+// inside the c64u. The ReST API has no dedicated "machine:" command for it:
+// the c64u keeps it as the configuration item "Joystick Swapper" in the
+// category "U64 Specific Settings". So it is set through /v1/configs, just
+// like the CPU speed. The list of values comes from the device and reads
+// "Normal", "Swapped", "WASD Port 1", "WASD Port 2", depending on firmware.
+// ---------------------------------------------------------------------------
+
+// Short form for the card: "Swapped" -> "SWAPPED", "WASD Port 1" -> "WASD1".
+String joyTokenFromValue(const String& value) {
+  String upper = trimCopy(value);
+  upper.toUpperCase();
+  if (upper.indexOf("WASD") >= 0) {
+    const String digits = extractDigits(upper);
+    return digits.isEmpty() ? String("WASD") : ("WASD" + digits);
+  }
+  if (upper.indexOf("SWAP")   >= 0) return "SWAPPED";
+  if (upper.indexOf("NORMAL") >= 0) return "NORMAL";
+  upper.replace(" ", "");
+  return upper;
+}
+
+// Looks up the value the c64u expects for a short form. While the list is
+// still unknown the short form is passed through unchanged.
+String joyValueFromToken(const String& token) {
+  const String want = joyTokenFromValue(token);
+  for (size_t i = 0; i < app.joyChoiceCount; ++i) {
+    if (joyTokenFromValue(app.joyOptions[i]) == want) return app.joyOptions[i];
+  }
+  return trimCopy(token);
+}
+
+// Short text for the list and the message.
+String joyLabelFromToken(const String& token) {
+  const String t = joyTokenFromValue(token);
+  if (t == "NORMAL")  return "Normal";
+  if (t == "SWAPPED") return "Swapped";
+  if (t == "WASD")    return "WASD";
+  if (t.startsWith("WASD")) return "WASD P" + t.substring(4);
+  return trimCopy(token);
+}
+
 ApiResponse sendApiRequest(const char* method, const String& path, bool authenticated) {
   ApiResponse result;
 
@@ -2169,6 +2230,8 @@ bool writeCardText(CardKind kind, const String& text, String* errorOut) {
 //     CMD:POWEROFF=8      prompt, 8 s to confirm
 //     CMD:POWEROFF        prompt with the time configured on the device
 //     CMD:CPU=10          set the CPU to 10 MHz
+//     CMD:JOY             toggle the joystick ports (Normal <-> Swapped)
+//     CMD:JOY=SWAPPED     set the ports fixed; also NORMAL, WASD1, WASD2
 //
 // Upper/lower case and spaces do not matter. M5Dial and Core use and
 // M5Dial and Core - one card works on all devices.
@@ -2215,6 +2278,7 @@ bool parseCardCommand(const String& text, CardCommand* out) {
   else if (body == "MENU")     cmd.cmd = CardCmd::UltiMenu;
   else if (body == "POWEROFF") cmd.cmd = CardCmd::PowerOff;
   else if (body == "CPU")      cmd.cmd = CardCmd::CpuSpeed;
+  else if (body == "JOY" || body == "JOYSTICK") cmd.cmd = CardCmd::JoySwap;
   else return false;
 
   if (cmd.cmd == CardCmd::CpuSpeed && arg.isEmpty()) return false;
@@ -2239,6 +2303,9 @@ String cardCommandText(const CardCommand& c) {
     case CardCmd::UltiMenu: return "CMD:MENU";
     case CardCmd::PowerOff: return "CMD:POWEROFF=" + String(cardPowerOffSeconds(c));
     case CardCmd::CpuSpeed: return "CMD:CPU=" + c.arg;
+    case CardCmd::JoySwap:  return (c.hasArg && !c.arg.isEmpty())
+                                   ? ("CMD:JOY=" + joyTokenFromValue(c.arg))
+                                   : String("CMD:JOY");
     default:                return "";
   }
 }
@@ -2254,15 +2321,19 @@ String cardCommandLabel(const CardCommand& c) {
                       : ("PowerOff, " + String(sec) + "s prompt");
     }
     case CardCmd::CpuSpeed: return "CPU " + c.arg + " MHz";
+    case CardCmd::JoySwap:  return (c.hasArg && !c.arg.isEmpty())
+                                   ? ("Joystick " + joyLabelFromToken(c.arg))
+                                   : String("Swap Joystick");
     default:                return "?";
   }
 }
 
 // ---- Pick list for writing a card -----------------------------------------
-// Fixed commands first, then all CPU steps the c64u offers.
-constexpr size_t kCmdFixedCount = 5;
+// Fixed commands first, then the joystick values and the CPU steps the
+// c64u offers.
+constexpr size_t kCmdFixedCount = 6;
 
-size_t cmdListCount() { return kCmdFixedCount + app.cpuChoiceCount; }
+size_t cmdListCount() { return kCmdFixedCount + app.joyChoiceCount + app.cpuChoiceCount; }
 
 CardCommand cmdListAt(size_t index) {
   CardCommand c;
@@ -2276,15 +2347,30 @@ CardCommand cmdListAt(size_t index) {
       c.arg    = String(app.settings.cardConfirmS);
       c.hasArg = true;
       return c;
+    case 5: c.cmd = CardCmd::JoySwap; return c;   // toggle, without argument
     default: break;
   }
-  const size_t cpu = index - kCmdFixedCount;
-  if (cpu < app.cpuChoiceCount) {
+  size_t rest = index - kCmdFixedCount;
+  if (rest < app.joyChoiceCount) {
+    c.cmd    = CardCmd::JoySwap;
+    c.arg    = joyTokenFromValue(app.joyOptions[rest]);
+    c.hasArg = true;
+    return c;
+  }
+  rest -= app.joyChoiceCount;
+  if (rest < app.cpuChoiceCount) {
     c.cmd    = CardCmd::CpuSpeed;
-    c.arg    = extractDigits(app.cpuDisplayOptions[cpu]);
+    c.arg    = extractDigits(app.cpuDisplayOptions[rest]);
     c.hasArg = true;
   }
   return c;
+}
+
+// Tag shown next to the list entry.
+const char* cmdListTag(size_t index) {
+  if (index < kCmdFixedCount) return "";
+  if (index - kCmdFixedCount < app.joyChoiceCount) return "JOY";
+  return "CPU";
 }
 
 // ------------------------------------------------------------
@@ -2320,7 +2406,7 @@ void serviceWiFi(uint32_t now) {
 
 // Refreshes the known connection status in the background at coarse intervals.
 // This lets the RGB LED show the real overall status without having to run a
-// manual "Connection Test" every time.
+// manual look at the status page every time.
 void refreshConnectionStatus(uint32_t now, bool force = false) {
   app.connection.wifiConnected = WiFi.status() == WL_CONNECTED;
 
@@ -2513,6 +2599,187 @@ void setCpuSpeed(int cpuIndex, uint32_t now) {
   }
 }
 
+// Looks for the item with "Joystick" in its name inside a category.
+bool inspectJoyCategory(const String& category, String* itemOut, String* valueOut) {
+  const ApiResponse response = sendApiRequest("GET", "/v1/configs/" + urlEncode(category), true);
+  if (!response.apiOk) return false;
+
+  DynamicJsonDocument doc(6144);
+  if (deserializeJson(doc, response.body) != DeserializationError::Ok) return false;
+
+  JsonVariant categoryObject = doc[category];
+  if (categoryObject.isNull()) {
+    for (JsonPair kv : doc.as<JsonObject>()) {
+      if (String(kv.key().c_str()) != "errors" && kv.value().is<JsonObject>()) {
+        categoryObject = kv.value();
+        break;
+      }
+    }
+  }
+  if (categoryObject.isNull() || !categoryObject.is<JsonObject>()) return false;
+
+  for (JsonPair kv : categoryObject.as<JsonObject>()) {
+    const String key = kv.key().c_str();
+    if (key.indexOf("Joystick") >= 0) {
+      *itemOut  = key;
+      *valueOut = jsonValueToString(kv.value());
+      return true;
+    }
+  }
+  return false;
+}
+
+// Fetches the list of values and the current state of the item found.
+bool refreshJoyChoices() {
+  if (app.joyCategory.isEmpty() || app.joyItem.isEmpty()) return false;
+
+  const ApiResponse response = sendApiRequest(
+      "GET", "/v1/configs/" + urlEncode(app.joyCategory) + "/" + urlEncode(app.joyItem), true);
+  if (!response.apiOk) return false;
+
+  DynamicJsonDocument doc(2048);
+  if (deserializeJson(doc, response.body) != DeserializationError::Ok) return false;
+
+  JsonVariant itemObject = doc[app.joyCategory][app.joyItem];
+  if (itemObject.isNull()) return false;
+
+  app.joyChoiceCount = 0;
+  JsonArray values = itemObject["values"].as<JsonArray>();
+  for (JsonVariant value : values) {
+    if (app.joyChoiceCount >= kMaxJoyChoices) break;
+    app.joyOptions[app.joyChoiceCount] = trimCopy(jsonValueToString(value));
+    app.joyChoiceCount += 1;
+  }
+  if (app.joyChoiceCount == 0) return false;
+
+  app.joyValue = trimCopy(jsonValueToString(itemObject["current"]));
+  return true;
+}
+
+// Finds category and item name once and remembers them.
+bool resolveJoyPath(String* detailOut = nullptr) {
+  if (app.joyPathKnown) {
+    if (app.joyChoiceCount == 0) refreshJoyChoices();
+    return true;
+  }
+
+  String item, value;
+  if (inspectJoyCategory("U64 Specific Settings", &item, &value)) {
+    app.joyCategory  = "U64 Specific Settings";
+    app.joyItem      = item;
+    app.joyValue     = trimCopy(value);
+    app.joyPathKnown = true;
+    refreshJoyChoices();
+    return true;
+  }
+
+  const ApiResponse listResponse = sendApiRequest("GET", "/v1/configs", true);
+  if (!listResponse.apiOk) {
+    if (detailOut) *detailOut = listResponse.errors.isEmpty() ? "Config list failed" : listResponse.errors;
+    return false;
+  }
+
+  DynamicJsonDocument doc(4096);
+  if (deserializeJson(doc, listResponse.body) != DeserializationError::Ok) {
+    if (detailOut) *detailOut = "Config list parse failed";
+    return false;
+  }
+
+  JsonArray categories = doc["categories"].as<JsonArray>();
+  for (JsonVariant valueVariant : categories) {
+    const String category = valueVariant.as<const char*>();
+    if (inspectJoyCategory(category, &item, &value)) {
+      app.joyCategory  = category;
+      app.joyItem      = item;
+      app.joyValue     = trimCopy(value);
+      app.joyPathKnown = true;
+      refreshJoyChoices();
+      return true;
+    }
+  }
+  if (detailOut) *detailOut = "Joystick item not found";
+  return false;
+}
+
+// Sets the port mapping to a fixed value.
+void applyJoystickValue(const String& wanted, uint32_t now) {
+  clearPendingPowerOff();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    beginWiFi(now);
+    setModal("NO WIFI", rgb565(255, 170, 84), now);
+    return;
+  }
+
+  String detail;
+  if (!resolveJoyPath(&detail)) {
+    setModal(detail, rgb565(255, 120, 96), now, 1900);
+    return;
+  }
+
+  const String target = joyValueFromToken(wanted);
+  const String path = "/v1/configs/" + urlEncode(app.joyCategory) + "/" + urlEncode(app.joyItem)
+                    + "?value=" + urlEncode(target);
+
+  const ApiResponse response = sendApiRequest("PUT", path, true);
+  if (response.apiOk) {
+    app.joyValue = target;
+    setModal("JOY " + joyLabelFromToken(target), rgb565(110, 230, 170), now, 1400);
+  } else {
+    const String text = response.errors.isEmpty() ? "JOY SET FAILED" : response.errors;
+    setModal(text, rgb565(255, 120, 96), now, 1900);
+  }
+  app.home.frameDirty = true;
+}
+
+// Toggles between "Normal" and "Swapped". If the c64u sits on one of the WASD
+// modes, it goes back to "Normal".
+void toggleJoystickSwap(uint32_t now) {
+  clearPendingPowerOff();
+  if (WiFi.status() != WL_CONNECTED) {
+    beginWiFi(now);
+    setModal("NO WIFI", rgb565(255, 170, 84), now);
+    return;
+  }
+
+  String detail;
+  if (!resolveJoyPath(&detail)) {
+    setModal(detail, rgb565(255, 120, 96), now, 1900);
+    return;
+  }
+  refreshJoyChoices();
+
+  applyJoystickValue(joyTokenFromValue(app.joyValue) == "NORMAL" ? "SWAPPED" : "NORMAL", now);
+}
+
+// Steps through every value the c64u offers, used by the setup list.
+void cycleJoystickValue(uint32_t now) {
+  clearPendingPowerOff();
+  if (WiFi.status() != WL_CONNECTED) {
+    beginWiFi(now);
+    setModal("NO WIFI", rgb565(255, 170, 84), now);
+    return;
+  }
+
+  String detail;
+  if (!resolveJoyPath(&detail)) {
+    setModal(detail, rgb565(255, 120, 96), now, 1900);
+    return;
+  }
+  refreshJoyChoices();
+  if (app.joyChoiceCount == 0) {
+    setModal("JOY?", rgb565(255, 120, 96), now, 1900);
+    return;
+  }
+
+  size_t index = 0;
+  for (size_t i = 0; i < app.joyChoiceCount; ++i) {
+    if (joyTokenFromValue(app.joyOptions[i]) == joyTokenFromValue(app.joyValue)) { index = i; break; }
+  }
+  index = (index + 1) % app.joyChoiceCount;
+  applyJoystickValue(app.joyOptions[index], now);
+}
+
 
 // ============================================================================
 //  Evaluate and execute cards
@@ -2561,6 +2828,11 @@ void runCardCommand(const CardCommand& cmd, const String& uid, uint32_t now) {
       setModal("POWER OFF? AGAIN!", rgb565(255, 190, 84), now, sec * 1000u);
       return;
     }
+
+    case CardCmd::JoySwap:
+      if (cmd.hasArg && !cmd.arg.isEmpty()) applyJoystickValue(cmd.arg, now);
+      else                                  toggleJoystickSwap(now);
+      return;
 
     case CardCmd::CpuSpeed: {
       if (!app.cpuPathKnown) refreshCpuValue();
@@ -3466,6 +3738,7 @@ void drawDisplaySettings() {
       String(effectDurationLabel(app.settings.effectDuration)),
       String(staticDurationLabel(app.settings.staticDuration)),
       brightnessLabel(app.settings.brightness),
+      app.joyValue.isEmpty() ? String("?") : joyLabelFromToken(app.joyValue),
       "Now"};
 
   constexpr int visibleRows = 4;
@@ -3682,7 +3955,8 @@ void drawCmdPick() {
   drawListFrame("COMMAND CARD", count, selected);
   for (int row = 0; row < kListRows && start + row < count; ++row) {
     const int index = start + row;
-    drawListEntry(row, cardCommandLabel(cmdListAt(index)), "", index == selected);
+    drawListEntry(row, cardCommandLabel(cmdListAt(index)),
+                  cmdListTag(static_cast<size_t>(index)), index == selected);
   }
 }
 
@@ -3833,6 +4107,7 @@ void nfcMenuSelect(uint32_t now) {
       // The CPU steps come from the c64u - load them once so the list
       // offers the values that are actually available.
       if (!app.cpuPathKnown) refreshCpuValue();
+      if (!app.joyPathKnown) resolveJoyPath();
       app.cmdIndex = 0;
       setScreenMode(ScreenMode::CmdPick, now);
       break;
@@ -4098,8 +4373,8 @@ void handleMenuSelect(uint32_t now) {
       openWifiMenu(now);
       break;
 
-    case kMenuConnTest:
-      runConnectionTest(now);
+    case kMenuJoySwap:
+      toggleJoystickSwap(now);
       break;
 
     case kMenuStatus:

@@ -364,6 +364,8 @@ CMD:POWEROFF=0      sofort ausschalten
 CMD:POWEROFF=8      nachfragen, 8 s Zeit für die Bestätigung
 CMD:POWEROFF        nachfragen mit der Geräteeinstellung "NFC-Cmd PowOff"
 CMD:CPU=10          CPU auf 10 MHz stellen
+CMD:JOY             Joystickports umschalten (Normal <-> Swapped)
+CMD:JOY=SWAPPED     Ports fest setzen; auch NORMAL, WASD1, WASD2
 ```
 
 `parseCardCommand()` ist unempfindlich gegen Groß-/Kleinschreibung und
@@ -453,11 +455,21 @@ es als Kopfzeile `X-Password` mit.
 | Konfigurationsbaum | `GET /v1/configs` |
 | CPU-Wert lesen | `GET /v1/configs/<Kategorie>/<Eintrag>` |
 | CPU-Wert setzen | `PUT /v1/configs/<Kategorie>/<Eintrag>?value=<Wert>` |
+| Joystickports lesen/setzen | dieselben `/v1/configs`-Pfade |
 
 Den Pfad zur CPU-Einstellung sucht `resolveCpuPath()` einmalig im
 Konfigurationsbaum – die Ultimate-Firmware benennt ihn je nach Version
 unterschiedlich. Gelingt das nicht, greift eine fest eingebaute Ersatzliste der
 üblichen Taktstufen.
+
+Fuer die Joystickports gibt es keinen `machine:`-Befehl. Sie sind ebenfalls ein
+Konfigurationseintrag, im Test *Joystick Swapper* in *U64 Specific Settings* mit
+den Werten `Normal`, `Swapped`, `WASD Port 2`, `WASD Port 1`. `resolveJoyPath()`
+sucht ihn nach demselben Muster (zuerst *U64 Specific Settings*, sonst alle
+Kategorien nach einem Eintragsnamen mit „Joystick"). `joyTokenFromValue()` und
+`joyValueFromToken()` rechnen zwischen Geraetewert und Kartenkuerzel um
+(`WASD Port 1` <-> `WASD1`). Achtung beim Lesen des Quelltexts: alles andere
+mit `joy` im Namen gehoert zum MiniJoyC am HAT-Port.
 
 `refreshConnectionStatus()` fragt höchstens alle 15 s nach, zuerst ohne und
 dann mit Passwort. Daraus ergeben sich die vier Zustände der Status-LED.

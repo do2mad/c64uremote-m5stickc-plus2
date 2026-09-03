@@ -126,7 +126,7 @@ A press of the power button (or joystick right) opens the menu:
 | **CPU Speed** | pick a clock speed, the list comes from the c64u |
 | **NFC / RFID** | read and write cards |
 | **WLAN** | set up and manage networks |
-| **Connection Test** | check the connection and show the result |
+| **Joystick Swap** | swap the joystick ports on the C64 (Normal ↔ Swapped) |
 | **Status** | Wi-Fi, reachability, password, CPU, address |
 | **Settings** | all settings |
 
@@ -140,6 +140,23 @@ your c64u actually offers. The stick queries them when the screen opens; if it
 is not connected at that moment, it shows a fallback list.
 
 Select and execute — the new value is shown briefly and taken over at the top.
+
+# Swapping the joystick ports
+
+Some games expect the joystick in port 1, others in port 2. Instead of moving the
+cable, the mapping can be swapped inside the C64.
+
+Choose **Joystick Swap** from the menu — every press toggles between *Normal* and
+*Swapped*, and *JOY Swapped* or *JOY Normal* appears briefly.
+
+*Settings → c64u Joystick* shows the current state and steps through every value
+your C64 offers: besides *Normal* and *Swapped* there may be *WASD P1* and
+*WASD P2*, depending on the firmware — the keyboard then drives that port.
+
+This is the mapping **inside the C64**, not the MiniJoyC on the stick. The
+Ultimate firmware has no dedicated remote command for it; the stick sets the
+*Joystick Swapper* item in the C64 configuration, exactly like the clock speed.
+The state therefore survives until it is changed again.
 
 # Setting up Wi-Fi
 
@@ -243,12 +260,15 @@ Available commands:
 | **PowerOff direkt** | switch off immediately, no prompt |
 | **PowerOff with prompt** | switch off, but only after confirmation |
 | **CPU x MHz** | set a clock speed |
+| **Swap Joystick** | toggle the joystick ports (Normal ↔ Swapped) |
+| **Joystick Normal / Swapped / WASD P1 / WASD P2** | set the port mapping to a fixed value |
 
 ## Creating a command card
 
 1. Choose *NFC / RFID → CMD-Karte*.
-2. Pick the command from the list. The stick fetches the CPU steps from the
-   c64u beforehand.
+2. Pick the command from the list. The stick fetches the joystick mappings and
+   the CPU steps from the c64u beforehand; *JOY* or *CPU* is shown on the
+   right.
 3. Present a card. *KARTE OK* means: written and read back for verification.
 
 A card can be rewritten as often as you like. The content stays a plain NDEF
@@ -279,6 +299,8 @@ CMD:MENU
 CMD:POWEROFF=0      switch off immediately
 CMD:POWEROFF=8      ask first, 8 s to confirm
 CMD:CPU=10          set the CPU to 10 MHz
+CMD:JOY             toggle the joystick ports
+CMD:JOY=SWAPPED     set the ports fixed; also NORMAL, WASD1, WASD2
 ```
 
 Case and spaces do not matter. The M5Dial and M5Stack Core use the same format —
@@ -340,6 +362,7 @@ lesen*.
 
 | Entry | Choices |
 |---|---|
+| **c64u Joystick** | port mapping in the C64: *Normal*, *Swapped*, and depending on firmware *WASD P1* / *WASD P2* |
 | **Factory Reset** | all settings back to their defaults |
 
 *Factory Reset* only touches the settings. Stored Wi-Fi credentials survive —

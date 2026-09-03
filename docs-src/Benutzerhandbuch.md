@@ -126,7 +126,7 @@ Ein Druck auf die Power-Taste (oder Joystick rechts) öffnet das Menü:
 | **CPU Speed** | Taktstufe wählen, die Liste kommt vom c64u |
 | **NFC / RFID** | Karten lesen und beschreiben |
 | **WLAN** | Netze einrichten und verwalten |
-| **Connection Test** | Verbindung prüfen und Ergebnis anzeigen |
+| **Joystick Swap** | Joystickports am C64 tauschen (Normal ↔ Swapped) |
 | **Status** | WLAN, Erreichbarkeit, Passwort, CPU, Adresse |
 | **Settings** | alle Einstellungen |
 
@@ -141,6 +141,23 @@ gerade nicht verbunden, zeigt er eine Ersatzliste an.
 
 Auswählen und ausführen – der neue Wert wird kurz eingeblendet und oben
 übernommen.
+
+# Joystickports tauschen
+
+Manche Spiele erwarten den Joystick in Port 1, andere in Port 2. Statt das Kabel
+umzustecken, lässt sich die Belegung im C64 vertauschen.
+
+Im Menü **Joystick Swap** wählen – jeder Druck schaltet zwischen *Normal* und
+*Swapped* hin und her, kurz erscheint *JOY Swapped* bzw. *JOY Normal*.
+
+Unter *Settings → c64u Joystick* steht der aktuelle Stand, und dort schaltest du
+durch alle Werte, die dein C64 anbietet: neben *Normal* und *Swapped* je nach
+Firmware auch *WASD P1* und *WASD P2* – dann steuert die Tastatur den Port.
+
+Gemeint ist hier die Belegung **im C64**, nicht der MiniJoyC am Stick. Einen
+eigenen Fernsteuerbefehl gibt es dafür in der Ultimate-Firmware nicht; der Stick
+setzt die Einstellung *Joystick Swapper* in der C64-Konfiguration, genau wie die
+Taktstufe. Der Stand bleibt deshalb erhalten, bis er wieder geändert wird.
 
 # WLAN einrichten
 
@@ -245,12 +262,15 @@ Möglich sind:
 | **PowerOff direkt** | sofort ausschalten, ohne Nachfrage |
 | **PowerOff mit Abfrage** | ausschalten, aber erst nach Bestätigung |
 | **CPU x MHz** | Taktstufe setzen |
+| **Joystick tauschen** | Joystickports umschalten (Normal ↔ Swapped) |
+| **Joystick Normal / Swapped / WASD P1 / WASD P2** | Portbelegung fest setzen |
 
 ## Eine Befehlskarte anlegen
 
 1. *NFC / RFID → CMD-Karte* wählen.
-2. Aus der Liste den gewünschten Befehl aussuchen. Die CPU-Stufen holt der Stick
-   vorher beim c64u ab.
+2. Aus der Liste den gewünschten Befehl aussuchen. Die Joystick-Belegungen und
+   die CPU-Stufen holt der Stick vorher beim c64u ab; rechts steht *JOY* oder
+   *CPU*.
 3. Karte auflegen. *KARTE OK* bedeutet: geschrieben und zur Kontrolle wieder
    eingelesen.
 
@@ -284,6 +304,8 @@ CMD:MENU
 CMD:POWEROFF=0      sofort ausschalten
 CMD:POWEROFF=8      nachfragen, 8 s Zeit für die Bestätigung
 CMD:CPU=10          CPU auf 10 MHz stellen
+CMD:JOY             Joystickports umschalten
+CMD:JOY=SWAPPED     Ports fest setzen; auch NORMAL, WASD1, WASD2
 ```
 
 Groß- und Kleinschreibung sowie Leerzeichen sind egal. Dasselbe Format benutzen
@@ -345,6 +367,7 @@ schaltet die Hintergrundabfrage ganz ab; Karten gehen dann nur noch über
 
 | Eintrag | Auswahl |
 |---|---|
+| **c64u Joystick** | Portbelegung im C64: *Normal*, *Swapped*, je nach Firmware *WASD P1* / *WASD P2* |
 | **Factory Reset** | alle Einstellungen auf die Werkswerte zurück |
 
 *Factory Reset* betrifft nur die Einstellungen. Gespeicherte WLAN-Zugänge

@@ -73,6 +73,7 @@ namespace {
 // Time and UI constants
 // ------------------------------------------------------------
 constexpr uint32_t kModalMs = 1400;
+constexpr uint32_t kApiRetryDelayMs  = 250;    // pause before the second attempt
 constexpr uint32_t kHttpTimeoutMs = 2500;
 constexpr uint32_t kWiFiRetryMs = 10000;
 constexpr uint32_t kConnectionProbeMs = 15000;
@@ -1217,7 +1218,7 @@ String joyLabelFromToken(const String& token) {
   return trimCopy(token);
 }
 
-ApiResponse sendApiRequest(const char* method, const String& path, bool authenticated) {
+ApiResponse sendApiRequestOnce(const char* method, const String& path, bool authenticated) {
   ApiResponse result;
 
   if (!hasTargetConfig()) {
@@ -1266,6 +1267,20 @@ ApiResponse sendApiRequest(const char* method, const String& path, bool authenti
   }
 
   http.end();
+  return result;
+}
+
+// The HTTP server in the c64u accepts only one connection at a time. With a
+// second device on the network asking at the same moment, "connection refused"
+// comes back although radio and address are fine. A transport error means
+// nothing reached the c64u - a second attempt is therefore harmless and saves
+// exactly this case.
+ApiResponse sendApiRequest(const char* method, const String& path, bool authenticated) {
+  ApiResponse result = sendApiRequestOnce(method, path, authenticated);
+  if (!result.transportOk && hasTargetConfig()) {
+    delay(kApiRetryDelayMs);
+    result = sendApiRequestOnce(method, path, authenticated);
+  }
   return result;
 }
 
@@ -2388,16 +2403,31 @@ void beginWiFi(uint32_t now) {
   if (!app.portalActive) WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);                  // no modem sleep, otherwise sluggish
   WiFi.begin(profile.ssid.c_str(), profile.pass.c_str());
   app.lastWiFiAttemptMs = now;
 
   if (gWifiCount > 1) gWifiTry = (gWifiTry + 1) % gWifiCount;
 }
 
+// Remembers which network the connection came up on. After a dropout that one
+// is tried first instead of blindly taking the next. With two stored networks
+// of which only one is reachable, this otherwise costs a full retry cycle
+// every other time.
+bool gWifiNoted = false;
+
 void serviceWiFi(uint32_t now) {
   if (app.portalActive) return;          // Portal takes priority
   if (!hasWiFiConfig()) return;
-  if (WiFi.status() == WL_CONNECTED) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!gWifiNoted) {
+      const int index = wifiProfileIndex(WiFi.SSID());
+      if (index >= 0) gWifiTry = static_cast<size_t>(index);
+      gWifiNoted = true;
+    }
+    return;
+  }
+  gWifiNoted = false;
 
   if (app.lastWiFiAttemptMs == 0 || now - app.lastWiFiAttemptMs >= kWiFiRetryMs) {
     beginWiFi(now);
@@ -2436,6 +2466,16 @@ void refreshConnectionStatus(uint32_t now, bool force = false) {
   if (!reach.transportOk) {
     app.connection.authOk = false;
     app.connection.detail = reach.errors.isEmpty() ? "Target unreachable" : reach.errors;
+    return;
+  }
+
+  // Without a stored password the second request would be byte-identical to the
+  // first - the X-Password header is only set when there is one. Every saved
+  // request leaves room on the c64u for a second device.
+  if (targetPassword().isEmpty()) {
+    app.connection.authOk = reach.apiOk;
+    app.connection.detail = reach.apiOk ? "Reachable + auth ok"
+                                        : (reach.errors.isEmpty() ? "Auth failed" : reach.errors);
     return;
   }
 

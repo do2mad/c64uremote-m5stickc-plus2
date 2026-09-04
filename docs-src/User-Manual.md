@@ -370,6 +370,13 @@ those are cleared under *WLAN → Alle loeschen*.
 
 # Frequently asked questions
 
+**Now and then *Not reached* or *Not verified* shows up and clears again.**
+The HTTP server in the c64u occasionally refuses a connection ("connection
+refused") although network and address are fine – this happens even with only a
+single device on the network. Since v1.2.1 the firmware retries a refused call
+by itself after a short pause, so you will usually not notice. If it stays that
+way, restarting the c64u helps.
+
 **The screen stays dark.**
 That is almost always the board setting at build time, not the hardware. See
 the technical documentation, chapter *Build environment*.

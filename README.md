@@ -17,7 +17,8 @@ erweitert von Martin Oswald ([@mad](https://1MHz.de)).
 | **WLAN per NFC-Karte einrichten** | eine am M5Dial oder Core beschriebene Karte auflegen – kein Neuflashen |
 | **Bis zu vier WLAN-Zugänge** | im internen Speicher (NVS), beim Start wird das Netz mit dem besten Empfang genommen |
 | **Setup-Portal** | eigener Accesspoint mit Weboberfläche, falls keine Karte zur Hand ist |
-| **Befehlskarten lesen** | `CMD:RESET`, `CMD:REBOOT`, `CMD:MENU`, `CMD:POWEROFF`, `CMD:CPU=…`, `CMD:JOY` |
+| **Direktmodus** | eigenes WLAN ohne Router für Treffen: Netz `C64uRemote-Direct`, c64u unter `192.168.4.64` (oder `192.168.2.64`) |
+| **Befehlskarten lesen** | `CMD:RESET`, `CMD:REBOOT`, `CMD:MENU`, `CMD:POWEROFF`, `CMD:M5OFF`, `CMD:CPU=…`, `CMD:JOY`, `CMD:DIRECT` |
 | **Karten beschreiben** | Befehlskarten und WLAN-Karten |
 | MiniJoyC (HAT-Port) | wie bisher, optional |
 

@@ -214,6 +214,8 @@ Ein Druck auf **A** beendet es sofort.
 
 | Eintrag | Was er tut |
 |---|---|
+| **Direktmodus** | Eigenes WLAN ohne Router, der c64u meldet sich direkt an (siehe Kapitel *Direktmodus*) |
+| **Direkt-Netz** | Adressbereich des Direktnetzes: `192.168.4.x` oder `192.168.2.x` |
 | **Gespeichert** | Liste aller Netze. Auswählen verbindet mit diesem Netz |
 | **Auf NFC-Karte** | schreibt den zuletzt benutzten Zugang auf eine Karte |
 | **Netz löschen** | ein einzelnes Netz aus der Liste werfen |
@@ -221,6 +223,80 @@ Ein Druck auf **A** beendet es sofort.
 
 In der Liste steht *aktiv* neben dem Netz, mit dem der Stick gerade verbunden
 ist. Kommt ein fünftes Netz dazu, fällt das am längsten nicht benutzte heraus.
+
+# Direktmodus: ohne Router, z. B. auf Treffen
+
+Auf einem Treffen gibt es oft kein WLAN – oder eines, in das man den c64u
+nicht hängen will. Für diesen Fall spannt der Stick selbst ein kleines WLAN
+auf, und der c64u meldet sich direkt bei ihm an. Ein Router ist nicht nötig.
+
+| | |
+|---|---|
+| **Netzname (SSID)** | `C64uRemote-Direct` |
+| **Passwort** | `c64ultimate` |
+| **Stick** | `192.168.4.1` |
+| **c64u** | `192.168.4.64` |
+
+## Einmal am c64u
+
+Der c64u kann sich nur **ein** WLAN merken. Trage dort im Ultimate-Menü unter
+den Netzwerk-/WLAN-Einstellungen Netzname und Passwort des Direktnetzes ein
+und lass die Adressvergabe auf **DHCP** stehen. Zurück zu Hause trägst du am
+c64u wieder dein Heimnetz ein.
+
+## Am Stick
+
+Unter **Menü → WLAN** *Direktmodus* auswählen. Der Stick schaltet sein normales WLAN ab,
+startet das Direktnetz und zeigt eine Seite mit allem, was der c64u braucht:
+Netzname, Passwort, die Adresse des c64u und den Stand der Verbindung
+(*warte auf den c64u*, *c64u verbunden*).
+
+Sobald sich der c64u anmeldet, bekommt er die Adresse `192.168.4.64` und der
+Stick prüft sofort, ob er antwortet. Danach funktioniert alles wie gewohnt.
+Die eingestellte Heimadresse des c64u bleibt dabei unangetastet.
+
+Meldet sich zuerst ein anderes Gerät an (etwa ein Handy), bekommt es die
+`.64` und der c64u die nächste Adresse. Das ist kein Problem: Der Stick probiert
+dann die angemeldeten Geräte der Reihe nach durch, bis sich der c64u meldet.
+Die gefundene Adresse steht auf der Direktmodus-Seite und in der Statusanzeige.
+
+Der Direktmodus bleibt auch nach dem Ausschalten eingestellt – der Stick startet
+dann gleich wieder mit dem Direktnetz.
+
+**Ausschalten:** Auf der Direktmodus-Seite **Power kurz** drücken (mit MiniJoyC: **rechts**). **A** führt nur zurück ins WLAN-Menü, der Direktmodus läuft dabei weiter. Der Stick verbindet sich danach wieder mit dem
+gespeicherten WLAN. Das passiert auch, wenn du unter *Gespeichert* ein Netz
+wählst oder eine WLAN-Karte auflegst.
+
+## Adressbereich
+
+*Direkt-Netz* schaltet zwischen `192.168.4.x` und `192.168.2.x` um. Der
+Stick hat immer die `.1`, der c64u die `.64`. Läuft der Direktmodus gerade,
+startet das Netz sofort neu; der c64u meldet sich von selbst wieder an.
+
+## Per Karte ein- und ausschalten
+
+Unter *NFC / RFID → CMD-Karte* stehen drei Befehlskarten für den Direktmodus: zuerst das
+gerade eingestellte Netz, dann das andere (`192.168.4.x` bzw. `192.168.2.x`),
+zuletzt *Direktmodus aus*. Auf der Karte steht dann `CMD:DIRECT=192.168.4`,
+`CMD:DIRECT=192.168.2` oder `CMD:DIRECT=OFF`. Auflegen schaltet sofort um;
+läuft der Direktmodus schon mit diesem Netz, passiert nichts – die Karte darf
+also liegen bleiben.
+
+## Weitere Geräte im Direktnetz
+
+- **Ein Handy oder Notebook** kann sich ebenfalls ins Direktnetz einbuchen. Die
+  Weboberfläche des c64u erreichst du dann unter `http://192.168.4.64`.
+- **Ein zweiter M5-Fernbediener** meldet sich wie in jedes andere WLAN an, am
+  einfachsten mit einer WLAN-Karte
+  `WIFI:S:C64uRemote-Direct;T:WPA;P:c64ultimate;;`. Erkennt er das Direktnetz,
+  spricht er den c64u automatisch unter der `.64` an – seine Heimadresse bleibt
+  gespeichert. Den Direktmodus schaltet immer nur **ein** Gerät ein.
+
+## Gut zu wissen
+
+- Das Direktnetz braucht etwas mehr Strom als der normale WLAN-Betrieb, weil der
+  Funk dauerhaft an sein muss.
+- Für einen Tisch reicht die Reichweite gut, quer durch einen Saal eher nicht.
 
 # NFC-Karten
 
@@ -292,6 +368,17 @@ Wie lang das Fenster ist, stellst du unter *Settings → NFC-Cmd PowOff* ein
 (3, 5, 8 oder 15 Sekunden, Werkseinstellung 8 s). Die Zeit wird beim Anlegen
 der Karte fest mitgeschrieben.
 
+
+## Stick per Karte ausschalten
+
+Eine Karte mit `CMD:M5OFF` schaltet den **Stick selbst** aus – ohne Nachfrage,
+weil das Auflegen schon eine bewusste Handlung ist. Am Akku geht er ganz aus;
+hängt USB dran, schläft er nur tief und startet mit der Einschalt- bzw.
+Reset-Taste neu. Damit eine Karte, die beim Einschalten noch aufliegt, das Gerät
+nicht gleich wieder abschaltet, wird sie in den ersten acht Sekunden nach dem
+Start ignoriert (*KARTE ABNEHMEN*). Dieselbe Karte schaltet auch einen M5Dial
+aus.
+
 ## Was auf der Karte steht
 
 Für alle, die Karten lieber mit einer Handy-App schreiben: Der Text ist
@@ -303,9 +390,12 @@ CMD:REBOOT
 CMD:MENU
 CMD:POWEROFF=0      sofort ausschalten
 CMD:POWEROFF=8      nachfragen, 8 s Zeit für die Bestätigung
+CMD:M5OFF           den Stick selbst ausschalten
 CMD:CPU=10          CPU auf 10 MHz stellen
 CMD:JOY             Joystickports umschalten
 CMD:JOY=SWAPPED     Ports fest setzen; auch NORMAL, WASD1, WASD2
+CMD:DIRECT=192.168.4  Direktmodus mit diesem Netz einschalten
+CMD:DIRECT=OFF      Direktmodus aus, zurück ins gespeicherte WLAN
 ```
 
 Groß- und Kleinschreibung sowie Leerzeichen sind egal. Dasselbe Format benutzen
@@ -381,6 +471,15 @@ refused"), obwohl Netz und Adresse in Ordnung sind – das passiert auch dann,
 wenn nur ein einziges Gerät im Netz hängt. Seit v1.2.1 wiederholt die Firmware
 einen abgewiesenen Aufruf nach kurzer Pause von selbst, du merkst davon also
 meist nichts mehr. Bleibt es dauerhaft dabei, hilft ein Neustart des c64u.
+
+**Der c64u fällt immer wieder aus, obwohl der Stick guten Empfang hat.**
+Seit v1.4.0 sollte das nicht mehr vorkommen: Die Verbindung zum c64u wurde
+gründlich überarbeitet (siehe CHANGELOG), und der c64u läuft per WLAN genauso
+zuverlässig wie per LAN-Kabel. Für Treffen ohne Router ist der Direktmodus da; dort hängt
+der c64u direkt am Stick.
+Ist der c64u nach vielen Netzwechseln gar nicht mehr zu erreichen, obwohl sein
+Menü eine Verbindung zeigt: kurz vom Strom trennen. Aus- und Einschalten per
+Taste hat in diesem Fall nicht gereicht.
 
 **Der Bildschirm bleibt dunkel.**
 Das ist fast immer die Board-Einstellung beim Übersetzen, nicht die Hardware.

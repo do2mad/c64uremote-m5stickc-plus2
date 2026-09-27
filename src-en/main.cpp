@@ -41,11 +41,18 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <lwip/sockets.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <esp_wifi.h>
+#include <esp_netif.h>
+#include <esp_netif_sta_list.h>
 #include <MFRC522_I2C.h>
 
 #include <algorithm>
@@ -69,12 +76,26 @@
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// Firmware version. Keep it up to date with every release - it is shown on
+// the status page and in the boot log and belongs to the CHANGELOG entry.
+// ---------------------------------------------------------------------------
+constexpr const char* kFwVersion = "1.4.0";
+constexpr const char* kFwDate    = "2026-09-27";
+
 // ------------------------------------------------------------
 // Time and UI constants
 // ------------------------------------------------------------
 constexpr uint32_t kModalMs = 1400;
 constexpr uint32_t kApiRetryDelayMs  = 250;    // pause before the second attempt
 constexpr uint32_t kHttpTimeoutMs = 2500;
+// Limit for setting up the connection to the c64u, per attempt. If no
+// connection comes about, up to two more attempts follow (kApiConnectAttempts).
+constexpr uint32_t kHttpConnectTimeoutMs = 1500;
+// In the direct network the c64u is one radio hop away - 1 s is enough.
+constexpr uint32_t kHttpConnectDirectMs  = 1000;
+// How often a failed connection setup is tried (in total).
+constexpr uint8_t  kApiConnectAttempts   = 3;
 constexpr uint32_t kWiFiRetryMs = 10000;
 constexpr uint32_t kConnectionProbeMs = 15000;
 constexpr uint32_t kFrameMs = 33;
@@ -127,6 +148,34 @@ constexpr uint32_t kWifiCardConnectMs = 8000;   // Wait time after a WiFi card
 constexpr const char* kPortalSsid    = "C64uRemote-Setup";
 constexpr const char* kPortalPass    = "c64ultimate";
 constexpr uint8_t     kPortalDnsPort = 53;
+
+// ---------------------------------------------------------------------------
+// Direct mode
+//
+// For meetings without a router: the StickC opens its own WiFi and the
+// c64u joins it. The c64u can only remember one network - so the SSID and
+// password of the direct network are entered there once.
+//
+//   StickC  <net>.1     access point, hands out addresses via DHCP
+//   c64u    <net>.64    first address the DHCP server hands out
+//
+// If another device (e.g. a phone) connects first, it gets
+// .64 and the c64u the next one. The status test then tries all connected
+// devices in turn until the c64u answers.
+//
+// A second device (M5Dial, M5Core ...) can join the direct network as a
+// normal WiFi client. When it recognises the direct network's SSID, it also
+// addresses the c64u at <net>.64 - the home address is kept.
+// ---------------------------------------------------------------------------
+constexpr const char* kDirectSsidDef    = "C64uRemote-Direct";
+constexpr const char* kDirectPassDef    = "c64ultimate";
+constexpr const char* kDirectNetDef     = "192.168.4";
+constexpr const char* kDirectNetAlt     = "192.168.2";   // second choice in the menu
+constexpr uint8_t     kDirectApHost     = 1;
+constexpr uint8_t     kDirectC64Host    = 64;
+constexpr uint8_t     kDirectChannel    = 6;
+constexpr uint8_t     kDirectMaxClients = 8;
+constexpr size_t      kDirectCandMax    = 11;    // .64 + up to ten devices
 
 // ------------------------------------------------------------
 // MiniJoyC I2C address and registers
@@ -227,7 +276,9 @@ constexpr const char* kNfcMenuItems[kNfcMenuCount] = {
 
 // WiFi submenu
 enum WifiMenuId : uint8_t {
-  kWifiFromCard = 0,   // Read credentials from an NFC card
+  kWifiDirect = 0,     // direct mode on/off (own access point)
+  kWifiDirectNet,      // address range of the direct network
+  kWifiFromCard,       // read credentials from an NFC card
   kWifiPortal,         // Start the setup portal
   kWifiSavedList,      // saved networks: connect
   kWifiToCard,         // write the current credentials to a card
@@ -237,6 +288,8 @@ enum WifiMenuId : uint8_t {
 };
 
 constexpr const char* kWifiMenuItems[kWifiMenuCount] = {
+    "Direct mode",
+    "Direct net",
     "From NFC card",
     "Setup portal",
     "Saved",
@@ -259,6 +312,7 @@ enum class ScreenMode : uint8_t {
   WifiCard,       // Tap card -> read credentials
   WifiSaved,      // saved networks
   WifiPortal,     // Setup access point is running
+  WifiDirect,     // direct mode: show credentials for the c64u
 };
 
 // What a card can hold when it is not a file path.
@@ -269,8 +323,10 @@ enum class CardCmd : uint8_t {
   Reboot,
   UltiMenu,
   PowerOff,        // Argument = confirmation time in seconds, 0 = immediately
+  DeviceOff,       // switch the Stick itself off ("CMD:M5OFF")
   CpuSpeed,        // Argument = desired value, e.g. "10"
   JoySwap,         // Argument = target value; without one it toggles
+  Direct,          // argument = network (e.g. "192.168.4") or OFF; none = toggle
 };
 
 struct CardCommand {
@@ -524,12 +580,89 @@ const String& buildWifiPass() { static const String v = configString(C64U_WIFI_P
 const String& buildHost()     { static const String v = configString(C64U_TARGET_HOST);   return v; }
 const String& buildHostPass() { static const String v = configString(C64U_TARGET_PASSWORD); return v; }
 
-const String& targetHost()     { return gTargetHost; }
+// Direct mode (see kDirectSsidDef). Stored in the same NVS namespace
+// as the WiFi profiles.
+bool   gDirectMode = false;
+String gDirectSsid = kDirectSsidDef;
+String gDirectPass = kDirectPassDef;
+String gDirectNet  = kDirectNetDef;      // the first three parts, e.g. "192.168.4"
+String gDirectHost;                      // address currently used in the direct network
+bool   gDirectApUp = false;              // direct mode access point is running
+
+String directIp(uint8_t host) { return gDirectNet + "." + String(static_cast<unsigned>(host)); }
+
+// Three numbers 0..255 separated by dots - nothing more is checked.
+bool directNetValid(const String& net) {
+  int parts = 0;
+  int value = -1;
+  for (size_t i = 0; i <= net.length(); ++i) {
+    const char c = (i < net.length()) ? net[i] : '.';
+    if (c == '.') {
+      if (value < 0 || value > 255) return false;
+      ++parts;
+      value = -1;
+    } else if (c >= '0' && c <= '9') {
+      value = (value < 0 ? 0 : value * 10) + (c - '0');
+      if (value > 255) return false;
+    } else {
+      return false;
+    }
+  }
+  return parts == 3;
+}
+
+// Network name and signal strength of the WiFi connection, queried from the
+// driver at most once per second. WiFi.SSID() and WiFi.RSSI() ask the WiFi
+// driver on EVERY call (esp_wifi_sta_get_ap_info). targetHost() needs the
+// network name and is called all the time - thousands of driver requests per
+// second that put needless load on the radio.
+constexpr uint32_t kStaInfoMs = 1000;
+String   gStaSsidCache;
+int32_t  gStaRssiCache = 0;
+uint32_t gStaInfoMs    = 0;
+bool     gStaInfoValid = false;
+
+void refreshStaInfo() {
+  const uint32_t now = millis();
+  if (gStaInfoValid && now - gStaInfoMs < kStaInfoMs) return;
+  wifi_ap_record_t ap;
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    gStaSsidCache = String(reinterpret_cast<const char*>(ap.ssid));
+    gStaRssiCache = ap.rssi;
+  } else {
+    gStaSsidCache = "";
+    gStaRssiCache = 0;
+  }
+  gStaInfoMs    = now;
+  gStaInfoValid = true;
+}
+
+const String& staSsid() {
+  static const String kNone;
+  if (WiFi.status() != WL_CONNECTED) { gStaInfoValid = false; return kNone; }
+  refreshStaInfo();
+  return gStaSsidCache;
+}
+
+// Connected as a normal WiFi client to another device's direct network?
+bool onDirectNetAsClient() {
+  return !gDirectMode && !gDirectSsid.isEmpty() &&
+         WiFi.status() == WL_CONNECTED && staSsid() == gDirectSsid;
+}
+
+// Network usable: in direct mode our own access point, otherwise the
+// connection to the stored WiFi.
+bool netReady() { return gDirectMode ? gDirectApUp : (WiFi.status() == WL_CONNECTED); }
+
+const String& targetHost() {
+  if (gDirectMode || onDirectNetAsClient()) return gDirectHost;
+  return gTargetHost;
+}
 const String& targetPassword() { return gTargetPass; }
 
 bool hasWiFiConfig()   { return gWifiCount > 0; }
-bool hasTargetConfig() { return !gTargetHost.isEmpty(); }
-bool configReady()     { return hasWiFiConfig() && hasTargetConfig(); }
+bool hasTargetConfig() { return gDirectMode || !gTargetHost.isEmpty(); }
+bool configReady()     { return (gDirectMode || hasWiFiConfig()) && hasTargetConfig(); }
 
 // ------------------------------------------------------------
 // Colors / graphics
@@ -1087,10 +1220,6 @@ String urlEncode(const String& value) {
   return encoded;
 }
 
-String apiBaseUrl() {
-  return String("http://") + targetHost();
-}
-
 String extractErrors(DynamicJsonDocument& doc) {
   if (!doc.containsKey("errors")) {
     return "";
@@ -1218,66 +1347,212 @@ String joyLabelFromToken(const String& token) {
   return trimCopy(token);
 }
 
+// ---------------------------------------------------------------------------
+// Own, lean HTTP path to the c64u
+// ---------------------------------------------------------------------------
+// HTTPClient and WiFiClient wait blocking while connecting and reading. On the
+// home network most requests never arrived that way ("connection refused" or
+// "read Timeout"), although the c64u answers every computer at once - while
+// the pre-check, which keeps looking at the connection without waiting, got
+// its reply EVERY time in about 50 ms. So all requests now work that way:
+// connect and read the reply without waiting inside the network stack, and
+// close the connection only once the c64u has ended it itself.
+constexpr size_t kRawMaxBody = 16384;
+
+// Sets up the connection. 0 = up, otherwise HTTPC_ERROR_CONNECTION_REFUSED.
+int rawOpen(uint32_t connectMs, int* fdOut) {
+  IPAddress ip;
+  if (!ip.fromString(targetHost()) && !WiFi.hostByName(targetHost().c_str(), ip)) {
+    return HTTPC_ERROR_CONNECTION_REFUSED;
+  }
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return HTTPC_ERROR_CONNECTION_REFUSED;
+  ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family      = AF_INET;
+  addr.sin_port        = htons(80);
+  addr.sin_addr.s_addr = static_cast<uint32_t>(ip);
+  if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0 &&
+      errno != EINPROGRESS) {
+    ::close(fd);
+    return HTTPC_ERROR_CONNECTION_REFUSED;
+  }
+  const uint32_t startMs = millis();
+  for (;;) {
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(fd, &writable);
+    struct timeval noWait = {0, 0};
+    const int ready = ::select(fd + 1, nullptr, &writable, nullptr, &noWait);
+    if (ready > 0) {
+      int       sockErr = -1;
+      socklen_t len     = sizeof(sockErr);
+      ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockErr, &len);
+      if (sockErr != 0) { ::close(fd); return HTTPC_ERROR_CONNECTION_REFUSED; }
+      break;
+    }
+    if (ready < 0 || millis() - startMs >= connectMs) {
+      ::close(fd);
+      return HTTPC_ERROR_CONNECTION_REFUSED;
+    }
+    delay(2);
+  }
+  *fdOut = fd;
+  return 0;
+}
+
+// Sends everything. timeoutMs counts from the last progress.
+bool rawSendAll(int fd, const uint8_t* data, size_t len, uint32_t timeoutMs) {
+  size_t   done   = 0;
+  uint32_t lastMs = millis();
+  while (done < len) {
+    const int n = ::send(fd, data + done, len - done, MSG_DONTWAIT);
+    if (n > 0) {
+      done  += static_cast<size_t>(n);
+      lastMs = millis();
+      continue;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && millis() - lastMs < timeoutMs) {
+      delay(2);
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+// Reads the reply until the c64u closes the connection (or shortly after the
+// last announced byte). Returns the HTTP status or an HTTPC_ERROR_...; body
+// receives the payload (at most maxBody bytes).
+int rawReadResponse(int fd, uint32_t timeoutMs, String* body, size_t maxBody) {
+  String   raw;
+  char     buf[512];
+  uint32_t lastMs        = millis();
+  int      headerEnd     = -1;
+  long     contentLength = -1;
+  bool     complete      = false;
+  bool     closed        = false;
+  raw.reserve(512);
+  for (;;) {
+    const int n = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+    if (n > 0) {
+      if (raw.length() < maxBody + 1024) raw.concat(buf, static_cast<unsigned>(n));
+      lastMs = millis();
+      if (headerEnd < 0) {
+        headerEnd = raw.indexOf("\r\n\r\n");
+        if (headerEnd >= 0) {
+          String head = raw.substring(0, headerEnd);
+          head.toLowerCase();
+          const int at = head.indexOf("content-length:");
+          if (at >= 0) contentLength = head.substring(at + 15).toInt();
+        }
+      }
+      if (headerEnd >= 0 && contentLength >= 0 &&
+          static_cast<long>(raw.length()) >= headerEnd + 4 + contentLength) {
+        complete = true;
+      }
+      continue;
+    }
+    if (n == 0) { closed = true; break; }   // c64u hat geschlossen / c64u closed
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      const uint32_t limit = complete ? 200 : timeoutMs;
+      if (millis() - lastMs >= limit) break;
+      delay(2);
+      continue;
+    }
+    closed = true;   // Fehler, meist Reset / error, usually a reset
+    break;
+  }
+  if (raw.isEmpty()) return closed ? HTTPC_ERROR_CONNECTION_LOST : HTTPC_ERROR_READ_TIMEOUT;
+  if (headerEnd < 0) return HTTPC_ERROR_NO_HTTP_SERVER;
+  if (!raw.startsWith("HTTP/")) return HTTPC_ERROR_NO_HTTP_SERVER;
+  const int space = raw.indexOf(' ');
+  const int code  = space > 0 ? raw.substring(space + 1, space + 4).toInt() : 0;
+  if (code <= 0) return HTTPC_ERROR_NO_HTTP_SERVER;
+
+  if (body != nullptr) {
+    String head = raw.substring(0, headerEnd);
+    head.toLowerCase();
+    String payload = raw.substring(headerEnd + 4);
+    if (head.indexOf("transfer-encoding: chunked") >= 0) {
+      String plain;
+      int    pos = 0;
+      for (;;) {
+        const int eol = payload.indexOf("\r\n", pos);
+        if (eol < 0) break;
+        const long size = strtol(payload.substring(pos, eol).c_str(), nullptr, 16);
+        if (size <= 0) break;
+        plain += payload.substring(eol + 2, eol + 2 + size);
+        pos = eol + 2 + size + 2;
+      }
+      payload = plain;
+    }
+    if (payload.length() > maxBody) payload.remove(maxBody);
+    *body = payload;
+  }
+  return code;
+}
+
+// One complete request: connect, send, read the reply, close.
+int rawHttpRequest(const char* method, const String& path, bool authenticated, String* body,
+                   size_t maxBody) {
+  int fd = -1;
+  const int opened = rawOpen(gDirectMode ? kHttpConnectDirectMs : kHttpConnectTimeoutMs, &fd);
+  if (opened != 0) return opened;
+
+  String req;
+  req.reserve(160);
+  req += method;
+  req += " " + path + " HTTP/1.1\r\nHost: " + targetHost() + "\r\n";
+  if (authenticated && !targetPassword().isEmpty()) req += "X-Password: " + targetPassword() + "\r\n";
+  if (strcmp(method, "GET") != 0) req += "Content-Length: 0\r\n";
+  req += "Connection: close\r\n\r\n";
+  if (!rawSendAll(fd, reinterpret_cast<const uint8_t*>(req.c_str()), req.length(), kHttpTimeoutMs)) {
+    ::close(fd);
+    return HTTPC_ERROR_SEND_HEADER_FAILED;
+  }
+  const int code = rawReadResponse(fd, kHttpTimeoutMs, body, maxBody);
+  ::close(fd);
+  return code;
+}
+
 ApiResponse sendApiRequestOnce(const char* method, const String& path, bool authenticated) {
   ApiResponse result;
-
-  if (!hasTargetConfig()) {
-    result.errors = "Target host missing";
-    return result;
-  }
-
-  HTTPClient http;
-  http.setTimeout(kHttpTimeoutMs);
-  const String url = apiBaseUrl() + path;
-
-  if (!http.begin(url)) {
-    result.errors = "HTTP begin failed";
-    return result;
-  }
-
-  if (authenticated && !targetPassword().isEmpty()) {
-    http.addHeader("X-Password", targetPassword());
-  }
-
-  if (strcmp(method, "GET") == 0) {
-    result.httpCode = http.GET();
-  } else if (strcmp(method, "PUT") == 0) {
-    result.httpCode = http.sendRequest("PUT", "");
-  } else {
-    http.end();
+  if (!hasTargetConfig()) { result.errors = "Target host missing"; return result; }
+  if (strcmp(method, "GET") != 0 && strcmp(method, "PUT") != 0) {
     result.errors = "Unsupported method";
     return result;
   }
 
+  String body;
+  result.httpCode    = rawHttpRequest(method, path, authenticated, &body, kRawMaxBody);
   result.transportOk = result.httpCode > 0;
-
   if (result.transportOk) {
-    result.body = http.getString();
-
+    result.body = body;
     DynamicJsonDocument doc(4096);
     if (deserializeJson(doc, result.body) == DeserializationError::Ok) {
       result.jsonOk = true;
       result.errors = extractErrors(doc);
-      result.apiOk = result.httpCode >= 200 && result.httpCode < 300 && result.errors.isEmpty();
+      result.apiOk  = result.httpCode >= 200 && result.httpCode < 300 && result.errors.isEmpty();
     } else {
       result.apiOk = result.httpCode >= 200 && result.httpCode < 300;
     }
   } else {
-    result.errors = http.errorToString(result.httpCode);
+    result.errors = HTTPClient::errorToString(result.httpCode);
   }
-
-  http.end();
   return result;
 }
 
-// The HTTP server in the c64u accepts only one connection at a time. With a
-// second device on the network asking at the same moment, "connection refused"
-// comes back although radio and address are fine. A transport error means
-// nothing reached the c64u - a second attempt is therefore harmless and saves
-// exactly this case.
+// If no connection came about, the c64u received nothing - a fresh attempt is
+// harmless, even for a PUT. Other errors (e.g. no reply any more) are not
+// retried, since the command may already have been executed.
 ApiResponse sendApiRequest(const char* method, const String& path, bool authenticated) {
   ApiResponse result = sendApiRequestOnce(method, path, authenticated);
-  if (!result.transportOk && hasTargetConfig()) {
+  for (uint8_t attempt = 1; attempt < kApiConnectAttempts && hasTargetConfig() &&
+                            result.httpCode == HTTPC_ERROR_CONNECTION_REFUSED;
+       ++attempt) {
     delay(kApiRetryDelayMs);
     result = sendApiRequestOnce(method, path, authenticated);
   }
@@ -1452,6 +1727,11 @@ void saveNetConfig() {
       prefs.remove(keyP);
     }
   }
+  // Direct mode
+  prefs.putBool("dmode",   gDirectMode);
+  prefs.putString("dssid", gDirectSsid);
+  prefs.putString("dpass", gDirectPass);
+  prefs.putString("dnet",  gDirectNet);
   prefs.end();
 }
 
@@ -1477,7 +1757,18 @@ void loadNetConfig() {
       ++gWifiCount;
     }
   }
+  gDirectMode = prefs.getBool("dmode", false);
+  gDirectSsid = prefs.getString("dssid", kDirectSsidDef);
+  gDirectPass = prefs.getString("dpass", kDirectPassDef);
+  gDirectNet  = prefs.getString("dnet",  kDirectNetDef);
   prefs.end();
+
+  // Replace unusable direct network values with the defaults. WPA2
+  // requires a password of eight to 63 characters.
+  if (gDirectSsid.isEmpty() || gDirectSsid.length() > 32) gDirectSsid = kDirectSsidDef;
+  if (gDirectPass.length() < 8 || gDirectPass.length() > 63) gDirectPass = kDirectPassDef;
+  if (!directNetValid(gDirectNet)) gDirectNet = kDirectNetDef;
+  gDirectHost = directIp(kDirectC64Host);
 
   // Nothing stored yet -> take the initial values from build_env.h.
   if (!known && !buildWifiSsid().isEmpty()) {
@@ -1617,7 +1908,7 @@ bool textLooksLikeWifi(const String& text) {
 // Move the network with the best signal to the front so beginWiFi() tries
 // it first. Without a hit the order stays as it is.
 void wifiPickBestProfile() {
-  if (gWifiCount < 2) return;
+  if (gDirectMode || gWifiCount < 2) return;
 
   const int found = WiFi.scanNetworks(false, true);
   if (found <= 0) {
@@ -1747,6 +2038,7 @@ void startPortal(uint32_t now) {
   releaseLogoCache();          // Free heap for AP + web server
 
   WiFi.disconnect(true, false);
+  gDirectApUp = false;         // a running direct AP is replaced
   WiFi.mode(WIFI_AP);
   WiFi.softAP(kPortalSsid, kPortalPass);
   delay(120);
@@ -1892,9 +2184,39 @@ void rfidRelease() {
   rfid.PCD_StopCrypto1();
 }
 
+// ---------------------------------------------------------------------------
+// NFC reader RF field only when needed
+//
+// The driver leaves the 13.56 MHz field on permanently after start. On the
+// M5Dial, whose reader sits right next to the WiFi antenna, that noticeably
+// disturbed WiFi reception. Here the reader sits further away, but the field is
+// still only on for the actual probe and only while a card is being processed
+// - which also saves power.
+// ---------------------------------------------------------------------------
+bool gRfidFieldOn = true;   // nach PCD_Init an / on after PCD_Init
+
+void rfidFieldOn() {
+  if (gRfidFieldOn) return;
+  rfid.PCD_AntennaOn();
+  gRfidFieldOn = true;
+  delay(5);   // Karte braucht nach dem Einschalten ~5 ms / card needs ~5 ms after power-up
+}
+
+void rfidFieldOff() {
+  if (!gRfidFieldOn) return;
+  rfid.PCD_AntennaOff();
+  gRfidFieldOn = false;
+}
+
+bool gRfidHold = false;   // processed card still present, field stays on
+bool rfidHeldCardGone();
+
 bool cardPresent() {
+  if (!rfidHeldCardGone()) return false;
+  rfidFieldOn();
   const bool found = rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial();
   if (found) gClassicTryNdefFirst = true;   // re-detected for every new card
+  else       rfidFieldOff();
   return found;
 }
 
@@ -1915,12 +2237,55 @@ void setRfidTimerReload(uint16_t ticks) {
 }
 
 bool cardPresentQuick() {
+  if (!rfidHeldCardGone()) return false;
+  rfidFieldOn();
   setRfidTimerReload(kRfidProbeReload);
   const bool present = rfid.PICC_IsNewCardPresent();
   setRfidTimerReload(gRfidTimerReload);     // restore before selecting
-  if (!present) return false;
-  if (!rfid.PICC_ReadCardSerial()) return false;
+  if (!present || !rfid.PICC_ReadCardSerial()) {
+    rfidFieldOff();
+    return false;
+  }
   gClassicTryNdefFirst = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Holding on to a processed card
+//
+// After processCard() the card has been put to sleep with HLTA. With the field
+// permanently on it no longer answers REQA - so it is not executed or written a
+// second time while it stays on the reader. Switching the field off and on
+// again, however, wakes it up fresh and it counts as a new card: then it beeped
+// every second, the card was written again and again, and pulling it off in the
+// middle gave a write error. So after a processed card the field stays on until
+// the card is gone. Whether it is still there is checked with WUPA, which also
+// wakes a sleeping card; it is put back to sleep right away.
+// ---------------------------------------------------------------------------
+void rfidHoldCard() {
+  rfidRelease();   // HLTA + Crypto aus / HLTA + crypto off
+  gRfidHold = true;
+}
+
+uint8_t gRfidHoldMisses = 0;
+
+bool rfidHeldCardGone() {
+  if (!gRfidHold) return true;
+  setRfidTimerReload(kRfidProbeReload);
+  uint8_t atqa[2];
+  uint8_t size = sizeof(atqa);
+  const bool there = rfid.PICC_WakeupA(atqa, &size) == MFRC522_I2C::STATUS_OK;
+  setRfidTimerReload(gRfidTimerReload);
+  if (there) {
+    rfid.PICC_HaltA();
+    gRfidHoldMisses = 0;
+    return false;
+  }
+  // Only two misses in a row count as the card being gone.
+  if (++gRfidHoldMisses < 2) return false;
+  gRfidHoldMisses = 0;
+  gRfidHold = false;
+  rfidFieldOff();
   return true;
 }
 
@@ -2236,6 +2601,28 @@ bool writeCardText(CardKind kind, const String& text, String* errorOut) {
 }
 
 // ---------------------------------------------------------------------------
+// Switching the device itself off (command card CMD:M5OFF)
+//
+// M5.Power.powerOff() switches off completely on battery. With USB attached
+// the ESP32 keeps running - M5Unified then puts it into deep sleep, a press on
+// the power or reset button starts it again.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kDeviceOffBootGuardMs = 8000;
+
+void shutdownDevice() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextColor(rgb565(255, 170, 84), TFT_BLACK);
+  M5.Display.setTextSize(3);
+  M5.Display.drawString("OFF", M5.Display.width() / 2, M5.Display.height() / 2);
+  delay(600);
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  M5.Power.powerOff();
+}
+
+// ---------------------------------------------------------------------------
 // Command cards
 //
 //     CMD:RESET
@@ -2244,9 +2631,13 @@ bool writeCardText(CardKind kind, const String& text, String* errorOut) {
 //     CMD:POWEROFF=0      power off immediately
 //     CMD:POWEROFF=8      prompt, 8 s to confirm
 //     CMD:POWEROFF        prompt with the time configured on the device
+//     CMD:M5OFF           switch the Stick itself off
 //     CMD:CPU=10          set the CPU to 10 MHz
 //     CMD:JOY             toggle the joystick ports (Normal <-> Swapped)
 //     CMD:JOY=SWAPPED     set the ports fixed; also NORMAL, WASD1, WASD2
+//     CMD:DIRECT=192.168.4  switch direct mode on with this network
+//     CMD:DIRECT=OFF      direct mode off, back to the stored WiFi
+//     CMD:DIRECT          toggle direct mode
 //
 // Upper/lower case and spaces do not matter. M5Dial and Core use and
 // M5Dial and Core - one card works on all devices.
@@ -2292,8 +2683,10 @@ bool parseCardCommand(const String& text, CardCommand* out) {
   else if (body == "REBOOT")   cmd.cmd = CardCmd::Reboot;
   else if (body == "MENU")     cmd.cmd = CardCmd::UltiMenu;
   else if (body == "POWEROFF") cmd.cmd = CardCmd::PowerOff;
+  else if (body == "M5OFF" || body == "DIALOFF") cmd.cmd = CardCmd::DeviceOff;
   else if (body == "CPU")      cmd.cmd = CardCmd::CpuSpeed;
   else if (body == "JOY" || body == "JOYSTICK") cmd.cmd = CardCmd::JoySwap;
+  else if (body == "DIRECT" || body == "DIREKT") cmd.cmd = CardCmd::Direct;
   else return false;
 
   if (cmd.cmd == CardCmd::CpuSpeed && arg.isEmpty()) return false;
@@ -2317,10 +2710,12 @@ String cardCommandText(const CardCommand& c) {
     case CardCmd::Reboot:   return "CMD:REBOOT";
     case CardCmd::UltiMenu: return "CMD:MENU";
     case CardCmd::PowerOff: return "CMD:POWEROFF=" + String(cardPowerOffSeconds(c));
+    case CardCmd::DeviceOff: return "CMD:M5OFF";
     case CardCmd::CpuSpeed: return "CMD:CPU=" + c.arg;
     case CardCmd::JoySwap:  return (c.hasArg && !c.arg.isEmpty())
                                    ? ("CMD:JOY=" + joyTokenFromValue(c.arg))
                                    : String("CMD:JOY");
+    case CardCmd::Direct:   return c.hasArg ? ("CMD:DIRECT=" + c.arg) : String("CMD:DIRECT");
     default:                return "";
   }
 }
@@ -2335,10 +2730,18 @@ String cardCommandLabel(const CardCommand& c) {
       return sec == 0 ? String("PowerOff direct")
                       : ("PowerOff, " + String(sec) + "s prompt");
     }
+    case CardCmd::DeviceOff: return "Stick Power Off";
     case CardCmd::CpuSpeed: return "CPU " + c.arg + " MHz";
     case CardCmd::JoySwap:  return (c.hasArg && !c.arg.isEmpty())
                                    ? ("Joystick " + joyLabelFromToken(c.arg))
                                    : String("Swap Joystick");
+    case CardCmd::Direct: {
+      String a = c.arg;
+      a.toUpperCase();
+      if (!c.hasArg)   return "Direct mode on/off";
+      if (a == "OFF")  return "Direct mode off";
+      return "Direct mode " + c.arg + ".x";
+    }
     default:                return "?";
   }
 }
@@ -2346,7 +2749,7 @@ String cardCommandLabel(const CardCommand& c) {
 // ---- Pick list for writing a card -----------------------------------------
 // Fixed commands first, then the joystick values and the CPU steps the
 // c64u offers.
-constexpr size_t kCmdFixedCount = 6;
+constexpr size_t kCmdFixedCount = 10;
 
 size_t cmdListCount() { return kCmdFixedCount + app.joyChoiceCount + app.cpuChoiceCount; }
 
@@ -2362,7 +2765,19 @@ CardCommand cmdListAt(size_t index) {
       c.arg    = String(app.settings.cardConfirmS);
       c.hasArg = true;
       return c;
-    case 5: c.cmd = CardCmd::JoySwap; return c;   // toggle, without argument
+    case 5: c.cmd = CardCmd::DeviceOff; return c;
+    case 6: c.cmd = CardCmd::JoySwap; return c;   // toggle, without argument
+    // Direct mode: first the network currently set, then the other of the
+    // two usual ones, last "off".
+    case 7:
+      c.cmd = CardCmd::Direct; c.arg = gDirectNet; c.hasArg = true;
+      return c;
+    case 8:
+      c.cmd    = CardCmd::Direct;
+      c.arg    = (gDirectNet == kDirectNetDef) ? String(kDirectNetAlt) : String(kDirectNetDef);
+      c.hasArg = true;
+      return c;
+    case 9: c.cmd = CardCmd::Direct; c.arg = "OFF"; c.hasArg = true; return c;
     default: break;
   }
   size_t rest = index - kCmdFixedCount;
@@ -2393,7 +2808,10 @@ const char* cmdListTag(size_t index) {
 // ------------------------------------------------------------
 // Connects to the next saved network. With several entries it
 // advances on every attempt until one answers.
+void startDirectAp(uint32_t now);
+
 void beginWiFi(uint32_t now) {
+  if (gDirectMode) { startDirectAp(now); return; }
   if (!hasWiFiConfig()) return;
   if (gWifiTry >= gWifiCount) gWifiTry = 0;
 
@@ -2416,12 +2834,220 @@ void beginWiFi(uint32_t now) {
 // every other time.
 bool gWifiNoted = false;
 
+// ---------------------------------------------------------------------------
+// Direct mode: own access point
+// ---------------------------------------------------------------------------
+// Like the setup portal, without a station part: an active STA would search
+// for the home network in the background, change channel and keep
+// throwing the c64u off the network.
+void startDirectAp(uint32_t now) {
+  app.lastWiFiAttemptMs = now;
+  if (app.portalActive) return;          // portal has priority, continues here afterwards
+
+  IPAddress apIp;
+  IPAddress leaseStart;
+  if (!directNetValid(gDirectNet)) gDirectNet = kDirectNetDef;
+  apIp.fromString(directIp(kDirectApHost));
+  leaseStart.fromString(directIp(kDirectC64Host));
+
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, false);
+  delay(60);
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
+  // Start the AP first, then set the addresses. The other way round, depending
+  // on the core version, the default 192.168.4.1 stays - the setup portal never
+  // notices because it uses exactly this address.
+  gDirectApUp = WiFi.softAP(gDirectSsid.c_str(), gDirectPass.c_str(), kDirectChannel,
+                            0 /*sichtbar*/, kDirectMaxClients);
+  delay(100);
+  // The DHCP server hands out from <net>.64 - first come gets .64.
+  WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0), leaseStart);
+  delay(60);
+
+  gDirectHost = directIp(kDirectC64Host);
+  Serial.printf("Direct mode %s: SSID %s, IP %s, c64u %s\n",
+                gDirectApUp ? "active" : "FAILED", gDirectSsid.c_str(),
+                WiFi.softAPIP().toString().c_str(), gDirectHost.c_str());
+}
+
+void stopDirectAp() {
+  if (!gDirectApUp) return;
+  WiFi.softAPdisconnect(true);
+  gDirectApUp = false;
+}
+
+// Addresses of all devices currently connected to the access point.
+size_t directStationIps(uint32_t* out, size_t maxCount) {
+  wifi_sta_list_t      wifiList;
+  esp_netif_sta_list_t ipList;
+  memset(&wifiList, 0, sizeof(wifiList));
+  memset(&ipList, 0, sizeof(ipList));
+  if (esp_wifi_ap_get_sta_list(&wifiList) != ESP_OK) return 0;
+  if (esp_netif_get_sta_list(&wifiList, &ipList) != ESP_OK) return 0;
+  size_t count = 0;
+  for (int i = 0; i < ipList.num && count < maxCount; ++i) {
+    if (ipList.sta[i].ip.addr != 0) out[count++] = ipList.sta[i].ip.addr;
+  }
+  return count;
+}
+
+// The c64u does not answer at the address just tried: take the next
+// candidate. Order: first <net>.64, then all
+// connected devices. After the last one it starts over.
+//
+// If the c64u has already answered at the current address, the switch only
+// happens after the second failure in a row - it occasionally refuses on its
+// own (see sendApiRequest), which should not change the address right away.
+String  gDirectConfirmed;
+uint8_t gDirectMisses = 0;
+
+void directConfirmHost() {
+  gDirectConfirmed = gDirectHost;
+  gDirectMisses    = 0;
+}
+
+void directNextCandidate() {
+  if (!gDirectMode) return;
+  if (gDirectHost == gDirectConfirmed && ++gDirectMisses < 2) return;
+  gDirectMisses = 0;
+
+  String   cand[kDirectCandMax];
+  size_t   count = 0;
+  cand[count++] = directIp(kDirectC64Host);
+
+  uint32_t ips[kDirectCandMax - 1];
+  const size_t found = directStationIps(ips, kDirectCandMax - 1);
+  for (size_t i = 0; i < found && count < kDirectCandMax; ++i) {
+    const String ip = IPAddress(ips[i]).toString();
+    if (ip != cand[0]) cand[count++] = ip;
+  }
+
+  size_t current = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (cand[i] == gDirectHost) { current = i; break; }
+  }
+  gDirectHost = cand[(current + 1) % count];
+}
+
+// Like staSsid(): ask the driver for the number of stations at most every
+// 500 ms - serviceWiFi() needs it on every loop pass.
+size_t directStationCount() {
+  static size_t   cached = 0;
+  static uint32_t atMs   = 0;
+  static bool     valid  = false;
+  if (!gDirectApUp) { valid = false; return 0; }
+  const uint32_t now = millis();
+  if (!valid || now - atMs >= 500) {
+    cached = WiFi.softAPgetStationNum();
+    atMs   = now;
+    valid  = true;
+  }
+  return cached;
+}
+
+// After a device joins, the c64u needs a few seconds for DHCP and its HTTP
+// server - the first test then often comes too early. Instead of asking again
+// only after kConnectionProbeMs, check a few times in quick succession, on
+// any page, until it answers.
+constexpr uint32_t kDirectRecheckMs    = 3000;
+constexpr uint8_t  kDirectRecheckCount = 6;
+uint8_t  gDirectRechecks  = 0;
+uint32_t gDirectRecheckAt = 0;
+
+void directScheduleRechecks(uint32_t now) {
+  gDirectRechecks  = kDirectRecheckCount;
+  gDirectRecheckAt = now + kDirectRecheckMs;
+}
+
+bool directRecheckDue(uint32_t now) {
+  if (!gDirectMode || app.connection.authOk) { gDirectRechecks = 0; return false; }
+  if (gDirectRechecks == 0 || static_cast<int32_t>(now - gDirectRecheckAt) < 0) return false;
+  --gDirectRechecks;
+  gDirectRecheckAt = now + kDirectRecheckMs;
+  return true;
+}
+
+// When the last device has left, restart the DHCP server. It hands out
+// addresses via a pointer that only moves forward: if the c64u releases its
+// address when leaving or asks for the old one when coming back, the server
+// drops the entry and takes the next one (.65, .66 ...). A restart empties the
+// table and puts the pointer back to <net>.64.
+// Only with no devices connected - otherwise an address could be handed out
+// twice, because the server forgets the existing assignments.
+void directRestartDhcp() {
+  IPAddress apIp;
+  IPAddress leaseStart;
+  apIp.fromString(directIp(kDirectApHost));
+  leaseStart.fromString(directIp(kDirectC64Host));
+  WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0), leaseStart);
+  gDirectHost = directIp(kDirectC64Host);
+  Serial.println("Direct mode: all devices gone, DHCP starts at .64 again");
+}
+
+// ---------------------------------------------------------------------------
+// Switching direct mode
+// ---------------------------------------------------------------------------
+// Everything belonging to the old connection (status test, found address,
+// CPU value) is discarded - then everything is checked afresh.
+void resetDirectState() {
+  app.connection            = ConnectionState();
+  app.lastConnectionProbeMs = 0;
+  app.currentCpuValue       = "Unknown";
+  gDirectConfirmed          = "";
+  gDirectMisses             = 0;
+  gDirectHost               = directIp(kDirectC64Host);
+}
+
+// reconnect = false: the caller connects by itself afterwards (e.g. to
+// a network just chosen).
+void setDirectMode(bool on, uint32_t now, bool reconnect = true) {
+  if (gDirectMode == on) return;
+  gDirectMode = on;
+  saveNetConfig();
+  resetDirectState();
+  if (!on) {
+    stopDirectAp();
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+  }
+  app.lastWiFiAttemptMs = 0;
+  if (reconnect && !app.portalActive) beginWiFi(now);   // starts the AP or connects to WiFi
+}
+
+// New address range. If direct mode is running, the AP restarts right away -
+// the c64u then reconnects by itself.
+void setDirectNet(const String& net, uint32_t now) {
+  if (!directNetValid(net) || net == gDirectNet) return;
+  gDirectNet = net;
+  saveNetConfig();
+  resetDirectState();
+  if (gDirectMode && !app.portalActive) {
+    stopDirectAp();
+    startDirectAp(now);
+  }
+}
+
 void serviceWiFi(uint32_t now) {
   if (app.portalActive) return;          // Portal takes priority
+  if (gDirectMode) {
+    // If the access point is gone (start failed or ended from outside),
+    // restart it at the normal retry interval.
+    if ((!gDirectApUp || WiFi.getMode() != WIFI_AP) &&
+        (app.lastWiFiAttemptMs == 0 || now - app.lastWiFiAttemptMs >= kWiFiRetryMs)) {
+      startDirectAp(now);
+    }
+    // Last device gone: reset DHCP so the c64u gets .64 again.
+    static size_t lastStations = 0;
+    const size_t stations = directStationCount();
+    if (gDirectApUp && lastStations > 0 && stations == 0) directRestartDhcp();
+    lastStations = stations;
+    return;
+  }
   if (!hasWiFiConfig()) return;
   if (WiFi.status() == WL_CONNECTED) {
     if (!gWifiNoted) {
-      const int index = wifiProfileIndex(WiFi.SSID());
+      const int index = wifiProfileIndex(staSsid());
       if (index >= 0) gWifiTry = static_cast<size_t>(index);
       gWifiNoted = true;
     }
@@ -2438,7 +3064,29 @@ void serviceWiFi(uint32_t now) {
 // This lets the RGB LED show the real overall status without having to run a
 // manual look at the status page every time.
 void refreshConnectionStatus(uint32_t now, bool force = false) {
-  app.connection.wifiConnected = WiFi.status() == WL_CONNECTED;
+  app.connection.wifiConnected = netReady();
+
+  // Direct mode: when a new device connects to the access point, it is
+  // usually the c64u - check right away, starting again at <net>.64.
+  static size_t lastStations = 0;
+  const size_t stations = directStationCount();
+  if (gDirectMode && stations > lastStations && !app.connection.authOk) {
+    gDirectHost = directIp(kDirectC64Host);
+    force       = true;
+    directScheduleRechecks(now);
+  }
+  lastStations = stations;
+  // follow-up check after joining (see directRecheckDue)
+  if (directRecheckDue(now)) force = true;
+
+  if (gDirectMode && app.connection.wifiConnected && stations == 0) {
+    // Nobody connected - then no attempt is needed.
+    gDirectHost                    = directIp(kDirectC64Host);
+    app.connection.targetReachable = false;
+    app.connection.authOk          = false;
+    app.connection.detail          = "Direct: c64u not connected";
+    return;
+  }
 
   if (!configReady()) {
     app.connection.targetReachable = false;
@@ -2462,10 +3110,24 @@ void refreshConnectionStatus(uint32_t now, bool force = false) {
 
   const ApiResponse reach = sendApiRequest("GET", "/v1/version", false);
   app.connection.targetReachable = reach.transportOk;
+  // A c64u answers /v1/version with JSON - or, if it requires a password
+  // and none was sent, with 401/403.
+  const bool looksLikeC64u = reach.jsonOk || reach.httpCode == 401 || reach.httpCode == 403;
+  if (gDirectMode && looksLikeC64u) directConfirmHost();
 
   if (!reach.transportOk) {
     app.connection.authOk = false;
     app.connection.detail = reach.errors.isEmpty() ? "Target unreachable" : reach.errors;
+    directNextCandidate();                 // in direct mode try the next address
+    return;
+  }
+
+  if (gDirectMode && !looksLikeC64u) {
+    // Someone answered in the direct network, but not a c64u - keep looking.
+    app.connection.targetReachable = false;
+    app.connection.authOk          = false;
+    app.connection.detail          = "Direct: no c64u at " + gDirectHost;
+    directNextCandidate();
     return;
   }
 
@@ -2524,7 +3186,7 @@ void runConnectionTest(uint32_t now) {
 void performReset(uint32_t now) {
   clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2542,7 +3204,7 @@ void performReset(uint32_t now) {
 void performPowerOff(uint32_t now) {
   //clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2571,7 +3233,7 @@ void requestPowerOff(uint32_t now) {
 void performHardReset(uint32_t now) {
   clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2589,7 +3251,7 @@ void performHardReset(uint32_t now) {
 void performMenuButton(uint32_t now) {
   clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2607,7 +3269,7 @@ void performMenuButton(uint32_t now) {
 void setCpuSpeed(int cpuIndex, uint32_t now) {
   clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2745,7 +3407,7 @@ bool resolveJoyPath(String* detailOut = nullptr) {
 void applyJoystickValue(const String& wanted, uint32_t now) {
   clearPendingPowerOff();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2776,7 +3438,7 @@ void applyJoystickValue(const String& wanted, uint32_t now) {
 // modes, it goes back to "Normal".
 void toggleJoystickSwap(uint32_t now) {
   clearPendingPowerOff();
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2795,7 +3457,7 @@ void toggleJoystickSwap(uint32_t now) {
 // Steps through every value the c64u offers, used by the setup list.
 void cycleJoystickValue(uint32_t now) {
   clearPendingPowerOff();
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     beginWiFi(now);
     setModal("NO WIFI", rgb565(255, 170, 84), now);
     return;
@@ -2845,6 +3507,17 @@ void runCardCommand(const CardCommand& cmd, const String& uid, uint32_t now) {
       performMenuButton(now);
       return;
 
+    case CardCmd::DeviceOff:
+      // A card still lying on the reader at power-up would switch the device
+      // off again right away - so ignore it during the first seconds.
+      if (millis() < kDeviceOffBootGuardMs) {
+        setModal("REMOVE CARD", rgb565(255, 170, 84), now, 1500);
+        return;
+      }
+      rfidRelease();
+      shutdownDevice();
+      return;
+
     case CardCmd::PowerOff: {
       const uint8_t sec = cardPowerOffSeconds(cmd);
 
@@ -2873,6 +3546,39 @@ void runCardCommand(const CardCommand& cmd, const String& uid, uint32_t now) {
       if (cmd.hasArg && !cmd.arg.isEmpty()) applyJoystickValue(cmd.arg, now);
       else                                  toggleJoystickSwap(now);
       return;
+
+    case CardCmd::Direct: {
+      // Cards read repeatedly (card left lying) must not upset anything:
+      // "on with network X" and "off" therefore do nothing if the state
+      // is already right. Only the card without an argument toggles.
+      String a = cmd.arg;
+      a.trim();
+      String upper = a;
+      upper.toUpperCase();
+      const bool wantOff = cmd.hasArg && upper == "OFF";
+      const bool toggle  = !cmd.hasArg || a.isEmpty();
+      if (!toggle && !wantOff && !directNetValid(a)) {
+        setModal("CARD INVALID", rgb565(255, 120, 96), now, 2000);
+        return;
+      }
+      if (wantOff || (toggle && gDirectMode)) {
+        if (!gDirectMode) { setModal("DIRECT MODE IS OFF", rgb565(120, 220, 255), now, 1600); return; }
+        setDirectMode(false, now);
+        setModal("DIRECT MODE OFF", rgb565(255, 190, 84), now, 1800);
+        return;
+      }
+      if (!toggle) {
+        if (gDirectMode && gDirectNet == a) {
+          setModal("DIRECT MODE RUNNING", rgb565(110, 230, 170), now, 1600);
+          return;
+        }
+        setDirectNet(a, now);           // restarts a running AP right away
+      }
+      if (app.portalActive) stopPortal(now);
+      setDirectMode(true, now);
+      setModal("DIRECT " + gDirectNet + ".x", rgb565(110, 230, 170), now, 2000);
+      return;
+    }
 
     case CardCmd::CpuSpeed: {
       if (!app.cpuPathKnown) refreshCpuValue();
@@ -2906,6 +3612,7 @@ void applyWifiCard(const String& ssid, const String& pass, uint32_t now) {
   gWifiTry = index >= 0 ? static_cast<size_t>(index) : 0;
   app.lastWiFiAttemptMs = 0;
 
+  setDirectMode(false, now, false);        // WiFi card: direct mode ends
   if (app.portalActive) stopPortal(now);   // stops the AP and connects on its own
   else                  beginWiFi(now);
 
@@ -2991,9 +3698,18 @@ void processCard(uint32_t now) {
       return;
     }
 
+    // Card with our own direct network: this device is the
+    // access point, there is nothing to connect to.
+    if (gDirectMode && ssid == gDirectSsid) {
+      app.rfidHint = ssid;
+      app.home.frameDirty = true;
+      setModal("DIRECT MODE RUNNING", rgb565(110, 230, 170), now, 1800);
+      return;
+    }
+
     // If the connection is already up there is nothing to do. That also covers the
     // case where the card stays on the reader.
-    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid) {
+    if (WiFi.status() == WL_CONNECTED && staSsid() == ssid) {
       app.rfidHint = ssid;
       app.home.frameDirty = true;
       setModal("ALREADY CONNECTED", rgb565(110, 230, 170), now, 1800);
@@ -3067,6 +3783,7 @@ void serviceRfid(uint32_t now) {
 
   if (!onCardScreen) app.rfidHint = "card detected";
   processCard(now);
+  rfidHoldCard();
 }
 
 // ---------------------------------------------------------------------------
@@ -3095,6 +3812,7 @@ bool initRfid() {
       static_cast<uint16_t>(rfid.PCD_ReadRegister(MFRC522_I2C::TReloadRegH) << 8) |
       rfid.PCD_ReadRegister(MFRC522_I2C::TReloadRegL);
   if (reload > kRfidProbeReload) gRfidTimerReload = reload;
+  rfidFieldOff();   // field only when needed (see rfidFieldOn)
   return true;
 }
 
@@ -3188,7 +3906,7 @@ void updateMiniJoyStatusLed() {
   // The blinking deliberately goes through the LED output only and changes no
   // other status data. The display stays calm while the LED
   // still shows the error state clearly.
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!netReady()) {
     red = 255;
   } else if (app.connection.targetReachable && app.connection.authOk) {
     green = 255;
@@ -3826,11 +4544,19 @@ void drawDisplaySettings() {
 }
 
 void drawStatus() {
-  drawMenuTitle(app.rfidReady ? "STATUS  -  RFID2" : "STATUS");
+  drawMenuTitle((String(app.rfidReady ? "STATUS  -  RFID2" : "STATUS") + "   v" + kFwVersion).c_str());
   const bool wifiOk = WiFi.status() == WL_CONNECTED;
 
-  drawLabelValue(12, 20, "WiFi", wifiOk ? WiFi.SSID() : String("Disconnected"),
-                 wifiOk ? rgb565(110, 230, 170) : rgb565(255, 170, 84));
+  if (gDirectMode && !app.portalActive) {
+    // Direct mode: own access point, plus the number of connected devices
+    drawLabelValue(12, 20, "Direct",
+                   gDirectApUp ? String(static_cast<unsigned>(directStationCount())) + " device(s)"
+                               : String("starting..."),
+                   gDirectApUp ? rgb565(110, 230, 170) : rgb565(255, 170, 84));
+  } else {
+    drawLabelValue(12, 20, "WiFi", wifiOk ? staSsid() : String("Disconnected"),
+                   wifiOk ? rgb565(110, 230, 170) : rgb565(255, 170, 84));
+  }
   drawLabelValue(124, 20, "Target",
                  app.connection.targetReachable ? "Reachable" : "Not reached",
                  app.connection.targetReachable ? rgb565(110, 230, 170) : rgb565(255, 170, 84));
@@ -3936,6 +4662,8 @@ void drawNfcMenu() {
 // ---- WiFi submenu ---------------------------------------------------------
 String wifiMenuValue(size_t index) {
   switch (index) {
+    case kWifiDirect:       return gDirectMode ? "on" : "off";
+    case kWifiDirectNet:    return gDirectNet;
     case kWifiFromCard:  return app.rfidReady ? "present" : "no NFC";
     case kWifiPortal:    return app.portalActive ? "on" : "off";
     case kWifiSavedList: return String(static_cast<unsigned>(gWifiCount));
@@ -3979,7 +4707,7 @@ void drawWifiSaved() {
   for (int row = 0; row < kListRows && start + row < count; ++row) {
     const int index = start + row;
     const bool online = WiFi.status() == WL_CONNECTED &&
-                        WiFi.SSID() == gWifiProfiles[index].ssid;
+                        staSsid() == gWifiProfiles[index].ssid;
     drawListEntry(row, gWifiProfiles[index].ssid,
                   app.wifiSavedDelete ? "delete" : (online ? "active" : "connect"),
                   index == selected);
@@ -4053,6 +4781,35 @@ void drawPortal() {
   canvas.drawString("A = close", canvas.width() - 8, 102);
 }
 
+// Direct mode: everything to enter on the c64u at a glance.
+void drawDirect() {
+  drawMenuTitle("DIRECT MODE");
+
+  canvas.setTextDatum(top_left);
+  canvas.setFont(&fonts::Font2);
+
+  canvas.setTextColor(rgb565(156, 190, 228));
+  canvas.drawString("WiFi on the c64u", 12, 24);
+  canvas.setTextColor(TFT_WHITE);
+  canvas.drawString(gDirectSsid, 12, 38);
+
+  canvas.setTextColor(rgb565(156, 190, 228));
+  canvas.drawString("Password", 12, 56);
+  canvas.setTextColor(TFT_WHITE);
+  canvas.drawString(gDirectPass, 12, 70);
+
+  canvas.setTextColor(rgb565(156, 190, 228));
+  canvas.drawString("c64u", 12, 88);
+  canvas.setTextColor(app.connection.authOk ? rgb565(110, 230, 170) : rgb565(255, 190, 84));
+  canvas.drawString(targetHost(), 12, 102);
+
+  canvas.setTextDatum(top_right);
+  canvas.setTextColor(rgb565(156, 190, 228));
+  canvas.drawString(String(static_cast<unsigned>(directStationCount())) + " device(s)",
+                    canvas.width() - 8, 88);
+  canvas.drawString("Power = off", canvas.width() - 8, 102);
+}
+
 // ============================================================================
 //  Navigation
 // ============================================================================
@@ -4123,6 +4880,9 @@ void goBack(uint32_t now) {
       stopPortal(now);
       setScreenMode(ScreenMode::WifiMenu, now);
       break;
+    case ScreenMode::WifiDirect:
+      setScreenMode(ScreenMode::WifiMenu, now);   // direct mode keeps running
+      break;
     default:
       setScreenMode(ScreenMode::Menu, now);
       break;
@@ -4182,6 +4942,21 @@ void cmdPickSelect(uint32_t now) {
 // ---- Selection in the WiFi menu -------------------------------------------
 void wifiMenuSelect(uint32_t now) {
   switch (app.wifiMenuIndex) {
+    case kWifiDirect:
+      if (!gDirectMode) {
+        if (app.portalActive) stopPortal(now);
+        setDirectMode(true, now);
+        setModal("DIRECT MODE ON", rgb565(110, 230, 170), now, 1600);
+      }
+      setScreenMode(ScreenMode::WifiDirect, now);
+      break;
+
+    case kWifiDirectNet:
+      // Switch between the two usual ranges.
+      setDirectNet(gDirectNet == kDirectNetDef ? String(kDirectNetAlt) : String(kDirectNetDef), now);
+      setModal(String("NET ") + gDirectNet + ".x", rgb565(120, 220, 255), now, 1800);
+      break;
+
     case kWifiFromCard:
       if (!app.rfidReady) {
         setModal("NO RFID2", rgb565(255, 120, 96), now, 1800);
@@ -4267,6 +5042,7 @@ void wifiSavedSelect(uint32_t now) {
 
   gWifiTry = index;
   app.lastWiFiAttemptMs = 0;
+  setDirectMode(false, now, false);     // explicitly into WiFi: direct mode ends
   beginWiFi(now);
   setModal("CONNECTING...", rgb565(120, 220, 255), now, 1800);
   setScreenMode(ScreenMode::WifiMenu, now);
@@ -4314,6 +5090,11 @@ void activateCurrent(uint32_t now) {
     case ScreenMode::WifiPortal:
       goBack(now);
       break;
+    case ScreenMode::WifiDirect:
+      setDirectMode(false, now);
+      setScreenMode(ScreenMode::WifiMenu, now);
+      setModal("DIRECT MODE OFF", rgb565(255, 190, 84), now, 1800);
+      break;
   }
 }
 
@@ -4334,6 +5115,7 @@ void drawAppUi() {
     case ScreenMode::WifiSaved:       drawWifiSaved(); break;
     case ScreenMode::WifiCard:        drawCardWait("WIFI CARD", app.rfidHint); break;
     case ScreenMode::WifiPortal:      drawPortal(); break;
+    case ScreenMode::WifiDirect:      drawDirect(); break;
   }
 
   drawJoyOverlay();
@@ -4446,6 +5228,7 @@ void setup() {
   M5.begin(cfg);
 
   Serial.begin(115200);
+  Serial.printf("C64uRemote StickC Plus2 v%s (%s)\n", kFwVersion, kFwDate);
   M5.Display.setRotation(3);
 
   canvas.setColorDepth(16);
@@ -4485,7 +5268,7 @@ void setup() {
   Serial.printf("RFID2 %s\n", app.rfidReady ? "found" : "not found");
 
   // With several saved networks, the one with the best signal comes first.
-  if (gWifiCount > 1) {
+  if (!gDirectMode && gWifiCount > 1) {
     WiFi.mode(WIFI_STA);
     wifiPickBestProfile();
   }
@@ -4501,6 +5284,8 @@ void setup() {
 
   if (!logoReady) {
     setModal("LOW MEMORY", rgb565(255, 170, 84), millis(), 2400);
+  } else if (gDirectMode) {
+    setModal("DIRECT MODE", rgb565(120, 220, 255), millis(), 2000);
   } else if (!app.configReady) {
     setModal(hasWiFiConfig() ? "HOST MISSING" : "SET UP WIFI",
              rgb565(255, 170, 84), millis(), 2400);
@@ -4578,7 +5363,7 @@ void loop() {
   }
 
   // Reload the CPU value once WiFi is up
-  if (WiFi.status() == WL_CONNECTED && app.currentCpuValue == "Unknown" && app.screen == ScreenMode::Home) {
+  if (netReady() && app.currentCpuValue == "Unknown" && app.screen == ScreenMode::Home) {
     refreshCpuValue();
   }
 

@@ -103,6 +103,12 @@ WLAN-Karten benutzen das Schema aus dem WLAN-QR-Code:
 WIFI:S:MeinNetz;T:WPA;P:geheim;;
 ```
 
+## Firmware im Browser installieren
+
+Wer nur die fertige Firmware braucht, spart sich die Programmierumgebung: Auf
+**https://1mhz.de/M5-webflash/** lässt sie sich in Chrome oder Edge per USB-Kabel aufspielen (esptool-js), wahlweise mit deutscher oder englischer Oberfläche. Die Images dort
+enthalten keine Zugangsdaten; WLAN und c64u werden danach am Gerät eingerichtet.
+
 ## Bauen
 
 ```bash

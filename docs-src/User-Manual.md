@@ -44,6 +44,18 @@ you can use both at once.
 
 # First setup
 
+## Installing the firmware – without a development environment
+
+The ready-made firmware can be installed straight from the browser, with no VS
+Code or PlatformIO: open **https://1mhz.de/M5-webflash/** in **Chrome** or **Edge** on a computer
+(Safari and Firefox cannot do USB), connect the Stick with a USB **data** cable,
+pick device and language and click *Install*. The same page also
+installs every later update.
+
+The firmware from the page contains no credentials. Set up WiFi and the c64u
+address on the device afterwards as described below. If the connection fails,
+the hints on the page will help.
+
 Before the stick can find your C64, the Wi-Fi credentials and the address of
 the C64 have to be stored once. There are two ways to do that, and neither
 needs **reflashing**:
@@ -270,6 +282,19 @@ The same happens when you pick a network under *Saved* or present a WiFi card.
 *Direct net* switches between `192.168.4.x` and `192.168.2.x`. The Stick
 always has `.1`, the c64u `.64`. If direct mode is running, the network
 restarts right away; the c64u reconnects by itself.
+
+## Several devices at one table
+
+If two remotes open a direct network at the same time, they need different
+network names – otherwise a c64u may join the wrong device. That is what
+*Direct no.* in the WiFi menu is for: every press steps from *-* (no number,
+`C64uRemote-Direct`) through `C64uRemote-Direct-1` to `-9` and back again. Each
+number also uses its own radio channel (1, 6 or 11) so the networks do not
+disturb each other.
+
+On the c64u you enter exactly this network name – the direct mode page shows
+it. If direct mode is running, the network restarts with the new name right
+away.
 
 ## Switching by card
 

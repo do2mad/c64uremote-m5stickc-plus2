@@ -45,6 +45,18 @@ stecken.
 
 # Erste Einrichtung
 
+## Firmware aufspielen – ohne Programmierumgebung
+
+Die fertige Firmware lässt sich direkt im Browser aufspielen, ganz ohne VS Code
+und PlatformIO: **https://1mhz.de/M5-webflash/** in **Chrome** oder **Edge** am Computer öffnen
+(Safari und Firefox können kein USB), den Stick per USB-**Daten**kabel anschließen,
+Gerät und Sprache wählen und auf *Installieren* klicken. Dieselbe Seite
+spielt später auch jedes Update auf.
+
+Die Firmware von der Seite enthält keine Zugangsdaten. WLAN und die Adresse des
+c64u richtest du danach wie unten beschrieben am Gerät ein. Schlägt die
+Verbindung fehl, helfen die Hinweise auf der Seite weiter.
+
 Damit der Stick deinen C64 findet, müssen einmalig die WLAN-Zugangsdaten und die
 Adresse des C64 hinterlegt werden. Dafür gibt es zwei Wege, die beide **ohne
 neues Flashen** auskommen:
@@ -272,6 +284,19 @@ wählst oder eine WLAN-Karte auflegst.
 *Direkt-Netz* schaltet zwischen `192.168.4.x` und `192.168.2.x` um. Der
 Stick hat immer die `.1`, der c64u die `.64`. Läuft der Direktmodus gerade,
 startet das Netz sofort neu; der c64u meldet sich von selbst wieder an.
+
+## Mehrere Geräte an einem Tisch
+
+Spannen zwei Fernbedienungen gleichzeitig ein Direktnetz auf, brauchen sie
+verschiedene Netznamen – sonst bucht sich ein c64u womöglich beim falschen Gerät
+ein. Dafür gibt es *Direkt-Nr.* im WLAN-Menü: Jeder Druck schaltet weiter von
+*-* (ohne Nummer, `C64uRemote-Direct`) über `C64uRemote-Direct-1` bis `-9` und
+wieder zurück. Jede Nummer nutzt außerdem ihren eigenen Funkkanal (1, 6 oder
+11), damit sich die Netze nicht gegenseitig stören.
+
+Am c64u trägst du genau diesen Netznamen ein – die Seite des Direktmodus zeigt
+ihn an. Läuft der Direktmodus gerade, startet das Netz mit dem neuen Namen sofort
+neu.
 
 ## Per Karte ein- und ausschalten
 

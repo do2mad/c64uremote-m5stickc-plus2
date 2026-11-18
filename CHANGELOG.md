@@ -2,6 +2,59 @@
 
 C64uRemote für den **M5StickC Plus2**. Neueste Version zuerst.
 
+## v1.6.0 – 2026-11-19
+
+### Deutsch
+
+**Neu: c64u per Wake on LAN wecken.** Ab der c64u-Firmware 1.2 lässt sich der
+c64u über WLAN aufwecken (im c64u unter *Power Settings* die Einstellung
+*Wake on LAN* einschalten). Geweckt wird an die WLAN-MAC-Adresse, nicht an die
+IP-Adresse.
+
+- Die MAC holt sich der Stick selbst, sobald er den c64u einmal erreicht hat
+  (`/v1/info`, Feld `wifi_mac`), und merkt sie sich dauerhaft.
+- Fehlt der c64u ein paar Sekunden, öffnet sich die Rückfrage „c64u wecken?“ mit
+  NEIN/JA (B oder Joystick wählt, Power-Taste oder Joystick-Knopf bestätigt, A = NEIN) – einmal pro Ausfall. Nach dem Wecken schaut der Stick in kurzen Abständen nach, bis der c64u da ist.
+- Solange der c64u fehlt, öffnen der Menüpunkt PowerOff (dann „Wecken“) und Joystick nach unten dieselbe Rückfrage, statt auszuschalten. Ohne Bestätigung wird nie geweckt.
+- Wecken auch im Direktmodus: Der Weckruf geht dann an das eigene Funknetz des Stick.
+  Von selbst gefragt wird dort nur, wenn ein Gerät angemeldet ist (der schlafende c64u)
+  und trotzdem 15 s lang kein c64u antwortet.
+- Die Rückfrage zeigt die Auswahl deutlich: Die gewählte Taste ist grün (JA)
+  bzw. rot (NEIN) gefüllt, darunter steht, was die Bestätigung auslöst.
+- POWER weckt auch direkt nach dem Einschalten, solange der c64u noch nicht
+  geantwortet hat – und im Direktmodus auch dann, wenn kein c64u angemeldet ist.
+- JA, bevor das WLAN steht: Es erscheint „WECKRUF FOLGT, SOBALD WLAN DA“, der
+  Weckruf geht dann von selbst hinaus.
+- Der Weckruf wird 30 s lang alle 0,7 s wiederholt, bis der c64u antwortet – ein
+  schlafender c64u hört nur in Abständen ins WLAN. Einmal JA genügt.
+- Ist der c64u nicht erreichbar und Wecken nicht möglich, meldet POWER „c64u
+  NICHT ERREICHBAR“, statt nach dem Ausschalten zu fragen.
+
+### English
+
+**New: wake the c64u with Wake on LAN.** From c64u firmware 1.2 on the c64u can
+be woken over WiFi (enable *Wake on LAN* under *Power Settings* on the c64u).
+The wake-up goes to the WiFi MAC address, not to the IP address.
+
+- The Stick fetches the MAC itself as soon as it has reached the c64u once
+  (`/v1/info`, field `wifi_mac`) and keeps it.
+- If the c64u is missing for a few seconds, the request "Wake c64u?" opens with
+  NO/YES (B or joystick chooses, power button or joystick button confirms, A = NO) – once per outage. After waking, the Stick looks for the c64u at short intervals until it is there.
+- While the c64u is missing, the PowerOff menu item (then "Wake") and joystick down open the same request instead of powering off. Nothing is woken without confirmation.
+- Wake-up in direct mode too: the wake-up then goes to the Stick's own WiFi.
+  The request only opens by itself when a device is logged in (the sleeping c64u)
+  and still no c64u answers for 15 s.
+- The request shows the selection clearly: the selected button is filled green
+  (YES) or red (NO), and below it the box says what confirming will do.
+- POWER also wakes right after switching on, as long as the c64u has not
+  answered yet – and in direct mode also when no c64u is logged in.
+- YES before the WiFi is up: "WAKE-UP FOLLOWS WHEN WIFI IS UP" appears, and the
+  call goes out by itself.
+- The wake-up call is repeated every 0.7 s for 30 s until the c64u answers – a
+  sleeping c64u only listens to the WiFi at intervals. One YES is enough.
+- If the c64u cannot be reached and waking is not possible, POWER reports "c64u
+  NOT REACHABLE" instead of asking to power off.
+
 ## v1.5.0 – 2026-10-18
 
 ### Deutsch

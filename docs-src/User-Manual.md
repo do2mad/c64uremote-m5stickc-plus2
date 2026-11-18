@@ -436,6 +436,53 @@ The card itself is left completely untouched and stays valid; it belongs on the
 M5Dial or the M5Stack Core. The other way round: command and Wi-Fi cards behave
 identically on all four devices.
 
+# Waking the c64u (Wake on LAN)
+
+From c64u firmware **1.2** on, the c64u can be woken over WiFi – the Stick sends
+a wake-up call for it. Set it up once:
+
+1. On the c64u, enable **Wake on LAN** under **Power Settings** in the menu.
+2. Connect the Stick to the c64u once while it is switched on. The Stick then keeps
+   the c64u's WiFi address (MAC) – nothing else is needed.
+
+The wake-up goes over WiFi, to the MAC address, not to the IP address.
+
+## Waking
+
+If the c64u is off or cannot be reached, POWER wakes instead of switching off.
+The menu item **PowerOff** then reads **Wake**. Selecting it – or pushing the joystick down – opens the request. This also applies right after switching the Stick on, as long as the
+c64u has not answered yet.
+
+The request reads **"Wake c64u?"** with NO and YES (YES preselected).
+**B** or the **joystick** selects NO/YES, **PWR** or the **joystick button** confirms, **A** answers NO. The selected button is filled in colour (YES green, NO red); below it the box says what **PWR** will do.
+
+After **YES**, *WAKE-UP SENT* appears. The Stick repeats the wake-up call every
+0.7 seconds for 30 seconds until the c64u answers – a sleeping c64u only listens
+to the WiFi at intervals. **One YES is enough**; it may take a few seconds until
+the c64u starts up.
+
+If the Stick's WiFi is not up yet (right after switching on), *WAKE-UP FOLLOWS WHEN
+WIFI IS UP* appears. The call then goes out by itself as soon as the connection
+is there.
+
+If the c64u drops out during operation, the request opens **once by itself**
+after a few seconds. If it stays unanswered for 20 seconds, it closes again –
+that counts as NO. Nothing is ever woken without confirmation.
+
+## In direct mode
+
+Waking also works in direct mode; the call then goes into the Stick's own WiFi.
+If no c64u is logged in, POWER reads WAKE right away. The request only opens by
+itself there when a device is logged in (the sleeping c64u) and no c64u answers
+for 15 seconds. Whether waking works depends on whether the sleeping c64u stays
+logged in to the direct network.
+
+## Good to know
+
+- If the Stick cannot wake at all – the c64u's MAC is not known yet or no WiFi is
+  set up –, POWER reports *c64u NOT REACHABLE*.
+- While the c64u is running, POWER stays the normal power-off with confirmation.
+
 # Settings at a glance
 
 Every setting is saved immediately and survives a restart.

@@ -443,6 +443,54 @@ Die Karte bleibt dabei völlig unangetastet und gültig; sie gehört an den M5Di
 oder den M5Stack Core. Umgekehrt gilt: Befehls- und WLAN-Karten laufen an allen
 vier Geräten gleich.
 
+# c64u wecken (Wake on LAN)
+
+Ab der c64u-Firmware **1.2** lässt sich der c64u über das WLAN aufwecken – der
+Stick schickt dafür einen Weckruf. Einmal einrichten:
+
+1. Am c64u im Menü unter **Power Settings** die Einstellung **Wake on LAN**
+   einschalten.
+2. Den c64u einmal eingeschaltet mit dem Stick verbinden. Der Stick merkt sich dabei
+   die WLAN-Adresse (MAC) des c64u dauerhaft – mehr ist nicht nötig.
+
+Geweckt wird über das WLAN, und zwar an die MAC-Adresse, nicht an die IP-Adresse.
+
+## Wecken
+
+Ist der c64u aus oder nicht erreichbar, weckt POWER statt auszuschalten.
+Der Menüpunkt **PowerOff** heißt dann **Wecken**. Auswählen – oder den Joystick nach unten drücken – öffnet die Rückfrage. Das gilt auch direkt nach dem Einschalten des Stick, solange der c64u
+noch nicht geantwortet hat.
+
+Die Rückfrage lautet **„c64u wecken?“** mit NEIN und JA (Vorauswahl JA).
+**B** oder der **Joystick** wählt NEIN/JA, **PWR** oder der **Joystick-Knopf** bestätigt, **A** antwortet NEIN. Die gewählte Taste ist farbig gefüllt (JA grün, NEIN rot), darunter steht, was **PWR** auslöst.
+
+Nach **JA** erscheint *WECKRUF GESENDET*. Der Stick wiederholt den Weckruf
+30 Sekunden lang alle 0,7 Sekunden, bis der c64u antwortet – ein schlafender c64u
+hört nur in Abständen ins WLAN. **Einmal JA genügt**; es kann ein paar Sekunden
+dauern, bis der c64u hochfährt.
+
+Steht das WLAN des Stick noch nicht (gleich nach dem Einschalten), erscheint
+*WECKRUF FOLGT, SOBALD WLAN DA*. Der Weckruf geht dann von selbst hinaus, sobald
+die Verbindung steht.
+
+Fällt der c64u im Betrieb weg, öffnet sich die Rückfrage nach ein paar Sekunden
+**einmal von selbst**. Bleibt sie 20 Sekunden unbeantwortet, schließt sie sich
+wieder – das zählt als NEIN. Ohne Bestätigung wird nie geweckt.
+
+## Im Direktmodus
+
+Auch im Direktmodus lässt sich wecken; der Weckruf geht dann in das eigene
+Funknetz des Stick. Ist kein c64u angemeldet, heißt POWER sofort WECKEN. Von selbst
+gefragt wird dort nur, wenn ein Gerät angemeldet ist (der schlafende c64u) und
+15 Sekunden lang kein c64u antwortet. Ob das Wecken klappt, hängt davon ab, ob
+der schlafende c64u im Direktnetz angemeldet bleibt.
+
+## Gut zu wissen
+
+- Kann der Stick gar nicht wecken – die MAC des c64u ist noch unbekannt oder es ist
+  kein WLAN eingerichtet –, meldet POWER *c64u NICHT ERREICHBAR*.
+- Läuft der c64u, bleibt POWER das normale Ausschalten mit Abfrage.
+
 # Einstellungen im Überblick
 
 Alle Einstellungen werden sofort gespeichert und überstehen einen Neustart.

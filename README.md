@@ -18,6 +18,7 @@ erweitert von Martin Oswald ([@mad](https://1MHz.de)).
 | **Bis zu vier WLAN-Zugänge** | im internen Speicher (NVS), beim Start wird das Netz mit dem besten Empfang genommen |
 | **Setup-Portal** | eigener Accesspoint mit Weboberfläche, falls keine Karte zur Hand ist |
 | **Direktmodus** | eigenes WLAN ohne Router für Treffen: Netz `C64uRemote-Direct`, c64u unter `192.168.4.64` (oder `192.168.2.64`) |
+| **Wake on LAN** | c64u ab Firmware 1.2 über das WLAN wecken: Menüpunkt *Wecken* bzw. Joystick runter, Rückfrage NEIN/JA (seit v1.6.0) |
 | **Befehlskarten lesen** | `CMD:RESET`, `CMD:REBOOT`, `CMD:MENU`, `CMD:POWEROFF`, `CMD:M5OFF`, `CMD:CPU=…`, `CMD:JOY`, `CMD:DIRECT` |
 | **Karten beschreiben** | Befehlskarten und WLAN-Karten |
 | MiniJoyC (HAT-Port) | wie bisher, optional |
